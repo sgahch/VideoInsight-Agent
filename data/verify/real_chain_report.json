@@ -1,0 +1,100 @@
+{
+  "generated_at": "2026-08-27 12:27:58",
+  "total_elapsed": 143.01,
+  "success": 3,
+  "total": 4,
+  "samples": [
+    {
+      "label": "快手-语录情感",
+      "url": "https://v.kuaishou.com/JExSMSsx",
+      "task_id": "5097a1081689445aa57ffe42cd05847b",
+      "ok": false,
+      "error": "VideoInsightError: 视频下载失败：WARNING: [generic] Falling back on generic information extractor\nERROR: Unsupported URL: https://www.kuaishou.com/short-video/3xgardd6xnzk2sm?cc=share_copylink&followRefer=151&shareMethod=TOKEN&docId=9&kpn=KUAISHOU&subBiz=BROWSE_SLIDE_PHOTO&photoId=3xgardd6xnzk2sm&shareId=19094390227261&shareToken=X1uMnm4pu5SM2d6&shareResourceType=PHOTO_OTHER&userId=3xv866pnz3a34js&shareType=1&et=1_a%252F2006225677135841490_scn0&shareMode=APP&efid=3xerkr4ngcfswx2&originShareId=19094390227261&appType=21&shareObjectId=5249227013248687713&shareUrlOpened=0&timestamp=1787804502857&utm_source=app_share&utm_medium=app_share&utm_campaign=app_share&location=app_share",
+      "phases": {}
+    },
+    {
+      "label": "小红书-文字帖",
+      "url": "https://xhslink.cn/o/6990bRO5ehG",
+      "task_id": "024f70f75c1f40a8b22973bc42766cfd",
+      "ok": true,
+      "media": {
+        "title": "他们都想看你输啊 可你偏要赢给他们看",
+        "author": null,
+        "duration": 22.334,
+        "audio_path": "data\\tmp\\024f70f75c1f40a8b22973bc42766cfd\\69db4f9100000000220292d7.mp3"
+      },
+      "transcript": {
+        "chars": 86,
+        "segments": 6,
+        "head": "[0.02-1.64] 他们都想看你输啊。\n[2.70-10.26] 但你偏要先给他们看，就算全世界都否定你，你也不能否定你自己，你也可以输给任何。\n[10.64-12.10] 但唯独。\n[13.48-16.00] 不能输给你自己。当所有人。\n[16.48-18.16] 都想看你跌倒的时。\n[18.44-21.68] 那恰死你必须站稳的理由。"
+      },
+      "output": {
+        "chars": 433,
+        "head": "1. **一句话核心**：视频鼓励观众在面临外界否定与期待失败时，坚持自我、不向自我妥协，将他人质疑转化为站稳脚跟的动力。\n\n2. **内容大纲**：\n   - 外界压力：指出“他们都想看你输”的普遍困境。\n   - 自我坚守：强调即使全世界否定，也不能自我否定。\n   - 唯一对手：明确“不能输给自己”的核心原则。\n   - 逆境转化：将他人想看跌倒的意图，视为必须站稳的理由。\n\n3. **关键要点**：\n   - 外界否定是常态，但不应成为自我评价的依据。\n   - 自我否定是最大的失败，自我认同是底线。\n   - 真正的对手不是他人，而是自己的动摇与放弃。\n   - 他人的恶意期待可转化"
+      },
+      "phases": {
+        "download": 7.7,
+        "asr": 6.99,
+        "llm": 8.71
+      },
+      "total": 23.4,
+      "result_json": "data\\results\\024f70f75c1f40a8b22973bc42766cfd.json"
+    },
+    {
+      "label": "抖音-渣男五招",
+      "url": "https://v.douyin.com/lmwHu2zoSII/",
+      "task_id": "2bb3219b0238408bb1d8a956b67cdd87",
+      "ok": true,
+      "media": {
+        "title": "五招！让渣男无处遁形#女生必看 #带你了解男人 #情感",
+        "author": "91497912190",
+        "duration": 150,
+        "audio_path": "data\\tmp\\2bb3219b0238408bb1d8a956b67cdd87\\7673138671566172581.mp3"
+      },
+      "transcript": {
+        "chars": 1028,
+        "segments": 3,
+        "head": "[0.00-60.02] 什么样的男人是渣男啊？跟你们说个实话吧，有钱的不一定是渣男，穷的也不一定老实。帅的可能特专一，丑的有可能是个海王。但是下面这五点啊，只要这个男的站了一样，他肯定是个渣男没跑了。所有女孩子尤其是在感情里面受过伤，特别恋爱脑袋一定要保存起来，反复看啊。首先第一点，哭穷的男人绝对是有问题的。所有女孩子给我记好了，如果说一个男人是喜欢你的，那么他必须要在你面前装逼，必须要面子的。"
+      },
+      "output": {
+        "chars": 752,
+        "head": "好的，以下是基于您提供的视频转写文本进行的结构化总结：\n\n---\n\n**1. 一句话核心**  \n视频主旨是教女性识别渣男的五大特征，强调只要男性符合其中一点，就应果断远离，避免情感伤害。\n\n**2. 内容大纲**  \n- **引言**：澄清渣男与财富、外貌无关，提出五个关键判断标准。  \n- **第一点：哭穷的男人**：分析哭穷背后的动机（花女方钱或不愿花钱），并指出借钱行为的问题。  \n- **第二点：喜欢卖惨的男人**：指出卖惨者常无能力且推卸责任，暗示其可能吃软饭。  \n- **第三点：装直男的男人**：揭露“直男”是借口，真正喜欢的人会主动付出，装直男是为逃避责任和仪式感。  \n- "
+      },
+      "phases": {
+        "download": 9.33,
+        "asr": 62.76,
+        "llm": 8.0
+      },
+      "total": 80.09,
+      "result_json": "data\\results\\2bb3219b0238408bb1d8a956b67cdd87.json"
+    },
+    {
+      "label": "B站-哪里都是你",
+      "url": "https://b23.tv/OEG7G4m",
+      "task_id": "b4ec5fd03dcb4e5ea0678179825aaa1d",
+      "ok": true,
+      "media": {
+        "title": "全网最强？《哪里都是你》F5之张口就来～",
+        "author": "浙艺没有菲戈",
+        "duration": 143.231,
+        "audio_path": "data\\tmp\\b4ec5fd03dcb4e5ea0678179825aaa1d\\BV15q4y1A72A_p1.mp3"
+      },
+      "transcript": {
+        "chars": 105,
+        "segments": 19,
+        "head": "[2.90-4.54] 却不会。\n[5.36-6.06] 的心底。\n[7.48-8.54] 凄凉？\n[11.56-12.58] 的视线。\n[14.60-16.86] 而不是那遥远的未来。\n[43.18-43.84] 就是个。\n[48.14-48.90] 想起的痛苦。\n[53.92-54.66] 想把你。\n[64.64-65.62] 没安慰。\n[72.60-73.40] Now位。\n[74.08-7"
+      },
+      "output": {
+        "chars": 67,
+        "head": "无法基于提供的转写文本进行结构化总结，因为该文本内容不连贯、缺乏明确主题和完整语句，无法提取有效信息。请提供清晰、完整的视频转写内容。"
+      },
+      "phases": {
+        "download": 8.14,
+        "asr": 6.5,
+        "llm": 5.53
+      },
+      "total": 20.17,
+      "result_json": "data\\results\\b4ec5fd03dcb4e5ea0678179825aaa1d.json"
+    }
+  ]
+}

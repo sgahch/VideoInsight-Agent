@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VideoInsight Agent</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>VideoInsight Agent</h1>
+          <p id="serviceState">正在连接本地服务...</p>
+        </div>
+        <a class="docs-link" href="/docs">API 文档</a>
+      </header>
+
+      <section class="workspace" aria-label="视频分析工作台">
+        <form id="uploadForm" class="panel">
+          <div class="panel-head">
+            <h2>上传分析</h2>
+            <span>推荐</span>
+          </div>
+
+          <label class="file-drop" for="mediaFile">
+            <input id="mediaFile" name="file" type="file" accept="audio/*,video/*" />
+            <strong id="fileName">选择音频或视频文件</strong>
+            <small>文件会保存到项目 media 目录</small>
+          </label>
+
+          <div class="field-row">
+            <label for="uploadMode">模式</label>
+            <select id="uploadMode" name="mode">
+              <option value="summary">总结</option>
+              <option value="transcript">文字稿</option>
+              <option value="interview">面经提取</option>
+            </select>
+          </div>
+
+          <label class="switch">
+            <input id="uploadReal" type="checkbox" checked />
+            <span>真实分析</span>
+          </label>
+
+          <button type="submit">开始上传分析</button>
+        </form>
+
+        <form id="linkForm" class="panel">
+          <div class="panel-head">
+            <h2>链接分析</h2>
+            <span>增强</span>
+          </div>
+
+          <label class="field-block" for="videoUrl">
+            <span>视频链接</span>
+            <input id="videoUrl" name="url" type="url" placeholder="https://..." />
+          </label>
+
+          <div class="field-row">
+            <label for="linkMode">模式</label>
+            <select id="linkMode" name="mode">
+              <option value="summary">总结</option>
+              <option value="transcript">文字稿</option>
+              <option value="interview">面经提取</option>
+            </select>
+          </div>
+
+          <label class="switch">
+            <input id="linkReal" type="checkbox" checked />
+            <span>真实分析</span>
+          </label>
+
+          <button type="submit">开始链接分析</button>
+        </form>
+      </section>
+
+      <section class="result-layout" aria-label="分析结果">
+        <aside class="status-panel">
+          <h2>任务</h2>
+          <dl>
+            <div>
+              <dt>状态</dt>
+              <dd id="taskStatus">未开始</dd>
+            </div>
+            <div>
+              <dt>任务 ID</dt>
+              <dd id="taskId">-</dd>
+            </div>
+            <div>
+              <dt>来源</dt>
+              <dd id="taskSource">-</dd>
+            </div>
+          </dl>
+          <div class="progress">
+            <div id="progressBar"></div>
+          </div>
+          <p id="taskMessage">上传文件或提交链接后，这里会显示处理状态。</p>
+
+          <form id="cookieForm" class="cookie-box">
+            <h3>平台 Cookies</h3>
+            <div class="cookie-status">
+              <span id="cookieState">正在检查...</span>
+            </div>
+            <label for="cookieText">粘贴 Cookie 或 Cookie Editor JSON</label>
+            <textarea id="cookieText" rows="5" placeholder="Cookie: sessionid=...; sid_guard=... 或 Cookie Editor 导出的 JSON"></textarea>
+            <div class="button-grid two">
+              <button id="saveCookieText" type="button">粘贴保存</button>
+              <button id="verifyCookies" type="button">检查 Cookies</button>
+            </div>
+            <label for="cookieFile">上传 cookies.txt / JSON</label>
+            <input id="cookieFile" type="file" accept=".txt,.json,text/plain,application/json" />
+            <button type="submit">上传保存</button>
+            <div class="qr-box">
+              <div class="qr-head">
+                <h4>扫码登录</h4>
+                <span>推荐</span>
+              </div>
+              <button id="startQrLogin" type="button">打开扫码登录窗口</button>
+              <img id="qrImage" alt="抖音登录二维码" hidden />
+              <p id="qrMessage">窗口打开后用抖音 App 扫码登录，本页会自动尝试保存登录态。</p>
+            </div>
+            <div class="button-grid">
+              <button id="openCookieBrowser" type="button">打开登录窗口</button>
+              <button id="checkCookieBrowser" type="button">检查窗口</button>
+              <button id="captureCookieBrowser" type="button">抓取登录态</button>
+            </div>
+            <p id="cookieMessage">链接解析失败时再配置。</p>
+          </form>
+        </aside>
+
+        <div class="output-panel">
+          <div class="tabs" role="tablist" aria-label="结果视图">
+            <button class="tab active" data-target="summaryView" type="button">结果</button>
+            <button class="tab" data-target="transcriptView" type="button">文字稿</button>
+            <button class="tab" data-target="rawView" type="button">JSON</button>
+          </div>
+
+          <article id="summaryView" class="view active">
+            <pre id="summaryOutput">暂无结果</pre>
+          </article>
+          <article id="transcriptView" class="view">
+            <pre id="transcriptOutput">暂无文字稿</pre>
+          </article>
+          <article id="rawView" class="view">
+            <pre id="rawOutput">{}</pre>
+          </article>
+        </div>
+      </section>
+
+      <section class="history-panel panel" aria-label="历史任务">
+        <div class="panel-head">
+          <h2>历史任务</h2>
+          <button id="refreshHistory" type="button" class="ghost-btn">刷新</button>
+        </div>
+        <p id="historyMessage" class="history-message">加载中...</p>
+        <ul id="historyList" class="history-list"></ul>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

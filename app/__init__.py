@@ -1,0 +1,2 @@
+"""VideoInsight Agent MVP package."""
+
