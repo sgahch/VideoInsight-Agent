@@ -43,6 +43,12 @@ const els = {
   historyList: document.querySelector("#historyList"),
   historyMessage: document.querySelector("#historyMessage"),
   refreshHistory: document.querySelector("#refreshHistory"),
+  mediaPanel: document.querySelector("#mediaPanel"),
+  mediaVideo: document.querySelector("#mediaVideo"),
+  mediaAudio: document.querySelector("#mediaAudio"),
+  mediaDownloadMain: document.querySelector("#mediaDownloadMain"),
+  mediaDownloadAudio: document.querySelector("#mediaDownloadAudio"),
+  mediaHint: document.querySelector("#mediaHint"),
 };
 
 async function fetchJson(url, options = {}, timeoutMs = 15000) {
@@ -91,6 +97,7 @@ function setTask(task) {
   els.taskId.textContent = task.task_id || "-";
   els.taskSource.textContent = task.request?.url || "-";
   els.rawOutput.textContent = JSON.stringify(task, null, 2);
+  renderMedia(task);
 
   if (task.status === "queued") {
     setStatus("queued", "任务已提交，等待处理。");
@@ -113,6 +120,60 @@ function setTask(task) {
     els.summaryOutput.textContent = task.result?.output || "无结果";
     els.transcriptOutput.textContent = task.result?.transcript || "无文字稿";
   }
+}
+
+function renderMedia(task) {
+  els.mediaPanel.hidden = true;
+  els.mediaVideo.hidden = true;
+  els.mediaAudio.hidden = true;
+  els.mediaVideo.removeAttribute("src");
+  els.mediaVideo.load();
+  els.mediaAudio.removeAttribute("src");
+  els.mediaAudio.load();
+  els.mediaDownloadMain.hidden = false;
+  els.mediaDownloadAudio.hidden = true;
+  els.mediaHint.hidden = true;
+  delete els.mediaDownloadMain.dataset.onDemand;
+
+  if (task.status !== "succeeded") {
+    return;
+  }
+  const path = task.result?.media?.audio_path;
+  if (!path) {
+    return;
+  }
+  const tid = task.task_id;
+  const mediaUrl = `/tasks/${tid}/media?download=1`;
+  const videoUrl = `/tasks/${tid}/video?download=1`;
+  const filename = path.split(/[\\/]/).pop() || "media";
+  const storedIsVideo = /\.(mp4|webm|m4v|mov|ogv|mkv|avi)$/i.test(path);
+  const storedIsAudio = /\.(mp3|m4a|wav|aac|ogg|flac|opus)$/i.test(path);
+
+  if (storedIsVideo) {
+    els.mediaVideo.hidden = false;
+    els.mediaVideo.src = `/tasks/${tid}/media`;
+    els.mediaVideo.load();
+  } else if (storedIsAudio) {
+    els.mediaAudio.hidden = false;
+    els.mediaAudio.src = `/tasks/${tid}/media`;
+    els.mediaAudio.load();
+  }
+
+  if (storedIsVideo) {
+    els.mediaDownloadMain.href = videoUrl;
+    els.mediaDownloadMain.textContent = `下载视频（${filename}）`;
+  } else if (storedIsAudio) {
+    els.mediaDownloadMain.href = videoUrl;
+    els.mediaDownloadMain.textContent = "下载源视频（mp4）";
+    els.mediaDownloadMain.dataset.onDemand = "1";
+    els.mediaDownloadAudio.href = mediaUrl;
+    els.mediaDownloadAudio.textContent = `下载音频（${filename}）`;
+    els.mediaDownloadAudio.hidden = false;
+  } else {
+    els.mediaDownloadMain.href = mediaUrl;
+    els.mediaDownloadMain.textContent = `下载文件（${filename}）`;
+  }
+  els.mediaPanel.hidden = false;
 }
 
 function describeCookieSummary(summary) {
@@ -465,6 +526,13 @@ els.captureCookieBrowser.addEventListener("click", async () => {
 });
 
 els.refreshHistory.addEventListener("click", loadHistory);
+
+els.mediaDownloadMain.addEventListener("click", () => {
+  if (els.mediaDownloadMain.dataset.onDemand === "1") {
+    els.mediaHint.hidden = false;
+    els.mediaHint.textContent = "正在下载源视频，短视频约需 5~60 秒，请稍候…";
+  }
+});
 
 async function boot() {
   try {

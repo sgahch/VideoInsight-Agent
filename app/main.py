@@ -10,9 +10,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.adapters.downloader import default_cookies_file, resolve_cookies_file
+from app.adapters.downloader import YtDlpDownloader, default_cookies_file, resolve_cookies_file
 from app.browser_cookies import BrowserCookieError, capture_douyin_cookies, cookie_browser_status, start_cookie_browser
 from app.cookies import summarize_cookie_file, write_normalized_cookie_file
+from app.errors import VideoInsightError
 from app.qr_login import QRLoginError, check_qr_login, start_qr_login
 from app.schemas import AnalysisMode, AnalyzeRequest, AnalyzeResponse, TaskRecord
 from app.task_store import task_store
@@ -32,7 +33,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+WEB_DIR = PROJECT_ROOT / "web"
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
@@ -178,6 +180,63 @@ def _remove_task_files(task_id: str) -> None:
     for directory in (settings.tmp_dir / task_id, settings.media_dir / task_id):
         if directory.exists():
             shutil.rmtree(directory, ignore_errors=True)
+
+
+@app.get("/tasks/{task_id}/media")
+def get_task_media(task_id: str, download: bool = False) -> FileResponse:
+    """返回任务关联的媒体文件（默认是转写用的音频/原始文件）：内联预览，?download=1 触发下载。"""
+    media_path = _resolve_media_path(task_store.get(task_id))
+    if media_path is None:
+        raise HTTPException(status_code=404, detail="Media not found")
+    return _media_response(media_path, download)
+
+
+@app.get("/tasks/{task_id}/video")
+def get_task_video(task_id: str, download: bool = False) -> FileResponse:
+    """返回任务的完整视频：已存文件是视频时直接返回；链接任务只存了音频时按需下载源视频。"""
+    task = task_store.get(task_id)
+    stored = _resolve_media_path(task)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    if _is_video_extension(stored) or str(task.request.url).startswith("upload://"):
+        return _media_response(stored, download)
+
+    try:
+        video_path = _ensure_source_video(task, stored)
+    except VideoInsightError as exc:
+        raise HTTPException(status_code=422, detail=f"源视频下载失败：{exc}") from exc
+    return _media_response(video_path, download)
+
+
+def _resolve_media_path(task: TaskRecord | None) -> Path | None:
+    if task is None or task.result is None or not task.result.media.audio_path:
+        return None
+    media_path = Path(task.result.media.audio_path)
+    if not media_path.is_absolute():
+        media_path = PROJECT_ROOT / media_path
+    return media_path if media_path.is_file() else None
+
+
+def _is_video_extension(path: Path) -> bool:
+    return path.suffix.lower() in {".mp4", ".webm", ".m4v", ".mov", ".ogv", ".mkv", ".avi", ".flv", ".ts"}
+
+
+def _media_response(path: Path, download: bool) -> FileResponse:
+    return FileResponse(
+        path,
+        filename=path.name,
+        content_disposition_type="attachment" if download else "inline",
+    )
+
+
+def _ensure_source_video(task: TaskRecord, stored: Path) -> Path:
+    task_dir = stored.parent
+    cached = sorted(task_dir.glob("*.video.mp4"))
+    if cached:
+        return cached[0]
+    downloader = YtDlpDownloader(settings.tmp_dir)
+    return downloader.download_video(str(task.request.url), task.task_id)
 
 
 def _save_upload(file: UploadFile, task_id: str) -> Path:

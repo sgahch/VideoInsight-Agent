@@ -92,3 +92,74 @@ def test_delete_missing_task_returns_404(monkeypatch, tmp_path) -> None:
 
     response = client.delete("/tasks/does-not-exist")
     assert response.status_code == 404
+
+
+def test_task_media_endpoint(monkeypatch, tmp_path) -> None:
+    from app.schemas import AnalysisMode, AnalysisResult, AnalyzeRequest, MediaInfo
+    from app.task_store import SQLiteTaskStore
+
+    store = SQLiteTaskStore(tmp_path / "tasks.db")
+    monkeypatch.setattr(main_module, "task_store", store)
+    client = TestClient(app)
+
+    media_file = tmp_path / "clip.mp4"
+    media_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    task = store.create(
+        AnalyzeRequest(url="https://example.com/v", mode=AnalysisMode.summary, use_mock=True)
+    )
+    store.set_succeeded(
+        task.task_id,
+        AnalysisResult(
+            mode=AnalysisMode.summary,
+            transcript="t",
+            output="o",
+            media=MediaInfo(audio_path=str(media_file), source_url="https://example.com/v"),
+        ),
+    )
+
+    inline = client.get(f"/tasks/{task.task_id}/media")
+    assert inline.status_code == 200
+    assert "inline" in inline.headers.get("content-disposition", "")
+    assert inline.content == b"\x00\x00\x00\x18ftypmp42"
+
+    download = client.get(f"/tasks/{task.task_id}/media?download=1")
+    assert download.status_code == 200
+    assert "attachment" in download.headers.get("content-disposition", "")
+    assert "clip.mp4" in download.headers.get("content-disposition", "")
+
+    assert client.get("/tasks/does-not-exist/media").status_code == 404
+
+
+def test_task_video_endpoint_serves_stored_video(monkeypatch, tmp_path) -> None:
+    from app.schemas import AnalysisMode, AnalysisResult, AnalyzeRequest, MediaInfo
+    from app.task_store import SQLiteTaskStore
+
+    store = SQLiteTaskStore(tmp_path / "tasks.db")
+    monkeypatch.setattr(main_module, "task_store", store)
+    client = TestClient(app)
+
+    media_file = tmp_path / "clip.mp4"
+    media_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    task = store.create(
+        AnalyzeRequest(url="https://example.com/v", mode=AnalysisMode.summary, use_mock=True)
+    )
+    store.set_succeeded(
+        task.task_id,
+        AnalysisResult(
+            mode=AnalysisMode.summary,
+            transcript="t",
+            output="o",
+            media=MediaInfo(audio_path=str(media_file), source_url="https://example.com/v"),
+        ),
+    )
+
+    # 已存文件是视频时，/video 直接返回该文件，不触发网络下载
+    response = client.get(f"/tasks/{task.task_id}/video")
+    assert response.status_code == 200
+    assert response.content == b"\x00\x00\x00\x18ftypmp42"
+
+    download = client.get(f"/tasks/{task.task_id}/video?download=1")
+    assert download.status_code == 200
+    assert "attachment" in download.headers.get("content-disposition", "")
+
+    assert client.get("/tasks/does-not-exist/video").status_code == 404

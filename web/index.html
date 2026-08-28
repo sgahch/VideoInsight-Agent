@@ -130,6 +130,16 @@
         </aside>
 
         <div class="output-panel">
+          <div id="mediaPanel" class="media-panel" hidden>
+            <video id="mediaVideo" class="media-player" controls preload="metadata" hidden></video>
+            <audio id="mediaAudio" class="media-player" controls preload="metadata" hidden></audio>
+            <div class="media-actions">
+              <a id="mediaDownloadMain" class="download-link" href="#">下载</a>
+              <a id="mediaDownloadAudio" class="download-link ghost-download" href="#" hidden>下载音频（转写用）</a>
+              <span id="mediaHint" class="media-hint" hidden></span>
+            </div>
+          </div>
+
           <div class="tabs" role="tablist" aria-label="结果视图">
             <button class="tab active" data-target="summaryView" type="button">结果</button>
             <button class="tab" data-target="transcriptView" type="button">文字稿</button>

@@ -64,6 +64,23 @@ curl "http://127.0.0.1:8000/tasks?status=succeeded"
 curl -X DELETE http://127.0.0.1:8000/tasks/<task_id>
 ```
 
+## 媒体预览与下载
+
+分析完成的任务可通过以下接口预览或下载媒体文件（mp4/mp3 等）：
+
+```powershell
+# 浏览器内联预览
+curl http://127.0.0.1:8000/tasks/<task_id>/media
+
+# 下载已存媒体文件（链接任务默认是转写用的音频，快手/上传是完整视频）
+curl -o output.mp3 "http://127.0.0.1:8000/tasks/<task_id>/media?download=1"
+
+# 下载源视频（完整画面；链接任务会按需下载并缓存为 mp4）
+curl -o output.mp4 "http://127.0.0.1:8000/tasks/<task_id>/video?download=1"
+```
+
+网页端在结果区自动提供播放器与下载按钮：已存文件是音频时会同时显示"下载源视频（mp4）"与"下载音频（转写用）"两个按钮。
+
 ## 快手支持说明
 
 - 快手在 yt-dlp 中**没有 extractor**，本项目内置 `KuaishouDownloader`（`app/adapters/downloader.py`）：

@@ -105,6 +105,57 @@ class YtDlpDownloader:
             source_url=url,
         )
 
+    def download_video(self, url: str, task_id: str) -> Path:
+        """按需下载完整视频（含画面），合并为 mp4，返回文件路径。
+
+        用于链接任务只保存了音频（mp3）时的"源视频下载"：
+        与 download_audio 共用 cookies / ffmpeg 配置。
+        """
+        url = normalize_url(url)
+        yt_dlp_command = self._yt_dlp_command()
+        if yt_dlp_command is None:
+            raise ExternalDependencyError("未找到 yt-dlp 命令，请先安装依赖：pip install -r requirements.txt")
+
+        task_dir = self.tmp_dir / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        output_template = str(task_dir / "%(id)s.video.%(ext)s")
+        ffmpeg = resolve_ffmpeg()
+
+        cmd = [
+            *yt_dlp_command,
+            "-f",
+            "bv*+ba/b",
+            "--merge-output-format",
+            "mp4",
+            "--ffmpeg-location",
+            ffmpeg,
+            "-o",
+            output_template,
+            url,
+        ]
+        cookies_file = resolve_cookies_file(settings)
+        if cookies_file:
+            cmd.extend(["--cookies", str(cookies_file)])
+        elif settings.ytdlp_cookies_from_browser:
+            cmd.extend(["--cookies-from-browser", settings.ytdlp_cookies_from_browser])
+
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise WorkflowError(f"源视频下载失败：{friendly_download_error(detail)}")
+
+        candidates = sorted(task_dir.glob("*.video.mp4"))
+        if not candidates:
+            raise WorkflowError("源视频下载完成，但没有生成 mp4 文件。")
+        return candidates[0]
+
     @staticmethod
     def _yt_dlp_command() -> list[str] | None:
         executable = shutil.which("yt-dlp")

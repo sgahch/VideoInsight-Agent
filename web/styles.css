@@ -372,6 +372,61 @@ dd {
   padding: 10px;
 }
 
+.media-panel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+  padding: 12px 14px;
+}
+
+.media-panel[hidden] {
+  display: none;
+}
+
+.media-player {
+  max-width: 100%;
+  max-height: 260px;
+  border-radius: 8px;
+  background: #000;
+}
+
+.download-link {
+  display: inline-block;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  padding: 9px 14px;
+  text-decoration: none;
+}
+
+.download-link:hover {
+  background: var(--accent-strong);
+}
+
+.media-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ghost-download {
+  background: var(--surface-muted);
+  color: var(--accent-strong);
+}
+
+.ghost-download:hover {
+  background: #dce8df;
+}
+
+.media-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .tab {
   width: auto;
   min-height: 36px;
