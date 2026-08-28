@@ -18,11 +18,17 @@ CREATE TABLE IF NOT EXISTS tasks (
     result_json  TEXT,
     error        TEXT,
     created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
+    updated_at   TEXT NOT NULL,
+    client_id    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 """
+
+# 老库可能没有 client_id 列：启动时执行一次轻量迁移
+_MIGRATE_CLIENT_ID = "ALTER TABLE tasks ADD COLUMN client_id TEXT"
+# client_id 索引在迁移完成后创建（避免老库缺列时建索引失败）
+_INDEX_CLIENT_ID = "CREATE INDEX IF NOT EXISTS idx_tasks_client ON tasks(client_id)"
 
 
 class SQLiteTaskStore:
@@ -48,9 +54,17 @@ class SQLiteTaskStore:
             conn = self._connect()
             try:
                 conn.executescript(_SCHEMA)
+                self._migrate_if_needed(conn)
                 conn.commit()
             finally:
                 conn.close()
+
+    def _migrate_if_needed(self, conn: sqlite3.Connection) -> None:
+        """老库补 client_id 列（幂等，仅当列不存在时执行），随后建索引。"""
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+        if "client_id" not in columns:
+            conn.execute(_MIGRATE_CLIENT_ID)
+        conn.execute(_INDEX_CLIENT_ID)
 
     def create(self, request: AnalyzeRequest) -> TaskRecord:
         now = datetime.now()
@@ -65,14 +79,15 @@ class SQLiteTaskStore:
             conn = self._connect()
             try:
                 conn.execute(
-                    "INSERT INTO tasks (task_id, status, request_json, result_json, error, created_at, updated_at)"
-                    " VALUES (?, ?, ?, NULL, NULL, ?, ?)",
+                    "INSERT INTO tasks (task_id, status, request_json, result_json, error, created_at, updated_at, client_id)"
+                    " VALUES (?, ?, ?, NULL, NULL, ?, ?, ?)",
                     (
                         task.task_id,
                         task.status.value,
                         task.request.model_dump_json(),
                         task.created_at.isoformat(timespec="seconds"),
                         task.updated_at.isoformat(timespec="seconds"),
+                        task.request.client_id,
                     ),
                 )
                 conn.commit()
@@ -89,14 +104,30 @@ class SQLiteTaskStore:
                 conn.close()
         return self._row_to_task(row) if row else None
 
-    def list_tasks(self, limit: int = 50, status: TaskStatus | None = None) -> list[TaskRecord]:
-        sql = "SELECT * FROM tasks"
-        params: list[object] = []
+    def list_tasks(
+        self,
+        limit: int = 50,
+        status: TaskStatus | None = None,
+        client_id: str | None = None,
+    ) -> list[TaskRecord]:
+        """列出任务。
+
+        仅返回指定 client_id 创建的任务；client_id 为 None（未提供身份）时
+        返回空列表，避免无归属的老数据或他人任务被任何客户端看到。
+        """
+        if client_id is None:
+            return []
+
+        sql = "SELECT * FROM tasks WHERE client_id = ?"
+        params: list[object] = [client_id]
+
         if status is not None:
-            sql += " WHERE status = ?"
+            sql += " AND status = ?"
             params.append(status.value)
+
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
+
         with self._lock:
             conn = self._connect()
             try:

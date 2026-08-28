@@ -1,554 +1,1425 @@
-const state = {
-  taskId: null,
-  pollTimer: null,
-  qrSessionId: null,
-  qrPollTimer: null,
-  qrStartedAt: null,
-  lastTabRequestAt: null,
-};
+/**
+ * VideoInsight Agent 前端交互逻辑。
+ *
+ * 所有数据均来自后端真实接口，界面中不保留任何假数据：
+ *   POST /analyze-file   上传分析
+ *   POST /analyze        链接分析
+ *   GET  /tasks/{id}     任务轮询
+ *   GET  /tasks          历史任务
+ *   DELETE /tasks/{id}   删除任务
+ *   GET  /tasks/{id}/media|video  媒体预览与下载
+ *   POST /tasks/{id}/chat        AI Agent 对话
+ *   /cookies/*、/health          Cookies 授权与服务状态
+ */
+(function () {
+  "use strict";
 
-const els = {
-  serviceState: document.querySelector("#serviceState"),
-  uploadForm: document.querySelector("#uploadForm"),
-  linkForm: document.querySelector("#linkForm"),
-  mediaFile: document.querySelector("#mediaFile"),
-  fileName: document.querySelector("#fileName"),
-  uploadMode: document.querySelector("#uploadMode"),
-  linkMode: document.querySelector("#linkMode"),
-  uploadReal: document.querySelector("#uploadReal"),
-  linkReal: document.querySelector("#linkReal"),
-  videoUrl: document.querySelector("#videoUrl"),
-  taskStatus: document.querySelector("#taskStatus"),
-  taskId: document.querySelector("#taskId"),
-  taskSource: document.querySelector("#taskSource"),
-  taskMessage: document.querySelector("#taskMessage"),
-  progressBar: document.querySelector("#progressBar"),
-  summaryOutput: document.querySelector("#summaryOutput"),
-  transcriptOutput: document.querySelector("#transcriptOutput"),
-  rawOutput: document.querySelector("#rawOutput"),
-  statusPanel: document.querySelector(".status-panel"),
-  cookieForm: document.querySelector("#cookieForm"),
-  cookieState: document.querySelector("#cookieState"),
-  cookieText: document.querySelector("#cookieText"),
-  saveCookieText: document.querySelector("#saveCookieText"),
-  verifyCookies: document.querySelector("#verifyCookies"),
-  cookieFile: document.querySelector("#cookieFile"),
-  cookieMessage: document.querySelector("#cookieMessage"),
-  startQrLogin: document.querySelector("#startQrLogin"),
-  qrImage: document.querySelector("#qrImage"),
-  qrMessage: document.querySelector("#qrMessage"),
-  openCookieBrowser: document.querySelector("#openCookieBrowser"),
-  checkCookieBrowser: document.querySelector("#checkCookieBrowser"),
-  captureCookieBrowser: document.querySelector("#captureCookieBrowser"),
-  historyList: document.querySelector("#historyList"),
-  historyMessage: document.querySelector("#historyMessage"),
-  refreshHistory: document.querySelector("#refreshHistory"),
-  mediaPanel: document.querySelector("#mediaPanel"),
-  mediaVideo: document.querySelector("#mediaVideo"),
-  mediaAudio: document.querySelector("#mediaAudio"),
-  mediaDownloadMain: document.querySelector("#mediaDownloadMain"),
-  mediaDownloadAudio: document.querySelector("#mediaDownloadAudio"),
-  mediaHint: document.querySelector("#mediaHint"),
-};
+  /* ======================================================================
+   * 1. 常量
+   * ==================================================================== */
 
-async function fetchJson(url, options = {}, timeoutMs = 15000) {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    const text = await response.text();
-    let data;
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch {
-      data = { detail: text || response.statusText };
-    }
-    if (!response.ok) {
-      const message = data.detail || JSON.stringify(data);
-      throw new Error(message);
-    }
-    return data;
-  } catch (error) {
-    if (error.name === "AbortError") {
-      throw new Error("请求超时，请确认专用登录窗口仍然打开。");
-    }
-    throw error;
-  } finally {
-    window.clearTimeout(timer);
-  }
-}
+  const POLL_INTERVAL_MS = 2000;
+  const POLL_MAX_ATTEMPTS = 150; // 约 5 分钟后停止轮询，避免无限请求
+  const QR_POLL_INTERVAL_MS = 3000;
+  const QR_POLL_MAX_ATTEMPTS = 100; // 约 5 分钟
+  const DEFAULT_TIMEOUT_MS = 20000;
+  const CAPTURE_TIMEOUT_MS = 30000;
 
-function setStatus(status, message) {
-  els.statusPanel.classList.remove("queued", "running", "succeeded", "failed");
-  els.statusPanel.classList.add(status);
-  els.taskStatus.textContent = status;
-  els.taskMessage.textContent = message;
-
-  const width = {
-    queued: "18%",
-    running: "58%",
-    succeeded: "100%",
-    failed: "100%",
-  }[status] || "0%";
-  els.progressBar.style.width = width;
-}
-
-function setTask(task) {
-  els.taskId.textContent = task.task_id || "-";
-  els.taskSource.textContent = task.request?.url || "-";
-  els.rawOutput.textContent = JSON.stringify(task, null, 2);
-  renderMedia(task);
-
-  if (task.status === "queued") {
-    setStatus("queued", "任务已提交，等待处理。");
-    return;
-  }
-
-  if (task.status === "running") {
-    setStatus("running", "正在转写和分析，较长视频可能需要一两分钟。");
-    return;
-  }
-
-  if (task.status === "failed") {
-    setStatus("failed", task.error || "任务失败。");
-    els.summaryOutput.textContent = task.error || "任务失败。";
-    return;
-  }
-
-  if (task.status === "succeeded") {
-    setStatus("succeeded", "分析完成。");
-    els.summaryOutput.textContent = task.result?.output || "无结果";
-    els.transcriptOutput.textContent = task.result?.transcript || "无文字稿";
-  }
-}
-
-function renderMedia(task) {
-  els.mediaPanel.hidden = true;
-  els.mediaVideo.hidden = true;
-  els.mediaAudio.hidden = true;
-  els.mediaVideo.removeAttribute("src");
-  els.mediaVideo.load();
-  els.mediaAudio.removeAttribute("src");
-  els.mediaAudio.load();
-  els.mediaDownloadMain.hidden = false;
-  els.mediaDownloadAudio.hidden = true;
-  els.mediaHint.hidden = true;
-  delete els.mediaDownloadMain.dataset.onDemand;
-
-  if (task.status !== "succeeded") {
-    return;
-  }
-  const path = task.result?.media?.audio_path;
-  if (!path) {
-    return;
-  }
-  const tid = task.task_id;
-  const mediaUrl = `/tasks/${tid}/media?download=1`;
-  const videoUrl = `/tasks/${tid}/video?download=1`;
-  const filename = path.split(/[\\/]/).pop() || "media";
-  const storedIsVideo = /\.(mp4|webm|m4v|mov|ogv|mkv|avi)$/i.test(path);
-  const storedIsAudio = /\.(mp3|m4a|wav|aac|ogg|flac|opus)$/i.test(path);
-
-  if (storedIsVideo) {
-    els.mediaVideo.hidden = false;
-    els.mediaVideo.src = `/tasks/${tid}/media`;
-    els.mediaVideo.load();
-  } else if (storedIsAudio) {
-    els.mediaAudio.hidden = false;
-    els.mediaAudio.src = `/tasks/${tid}/media`;
-    els.mediaAudio.load();
-  }
-
-  if (storedIsVideo) {
-    els.mediaDownloadMain.href = videoUrl;
-    els.mediaDownloadMain.textContent = `下载视频（${filename}）`;
-  } else if (storedIsAudio) {
-    els.mediaDownloadMain.href = videoUrl;
-    els.mediaDownloadMain.textContent = "下载源视频（mp4）";
-    els.mediaDownloadMain.dataset.onDemand = "1";
-    els.mediaDownloadAudio.href = mediaUrl;
-    els.mediaDownloadAudio.textContent = `下载音频（${filename}）`;
-    els.mediaDownloadAudio.hidden = false;
-  } else {
-    els.mediaDownloadMain.href = mediaUrl;
-    els.mediaDownloadMain.textContent = `下载文件（${filename}）`;
-  }
-  els.mediaPanel.hidden = false;
-}
-
-function describeCookieSummary(summary) {
-  if (!summary?.exists) {
-    return "未保存 Cookies";
-  }
-  const loginState = summary.has_login_cookie ? "检测到登录态" : "未检测到关键登录态";
-  const present = summary.present_important?.length ? `；已有：${summary.present_important.join(", ")}` : "";
-  return `${summary.count || 0} 条，${loginState}${present}`;
-}
-
-async function refreshCookieStatus() {
-  try {
-    const data = await fetchJson("/cookies/status", {}, 8000);
-    els.cookieState.textContent = describeCookieSummary(data);
-    return data;
-  } catch (error) {
-    els.cookieState.textContent = error.message;
-    return null;
-  }
-}
-
-async function pollTask(taskId) {
-  window.clearInterval(state.pollTimer);
-  state.taskId = taskId;
-  els.taskId.textContent = taskId;
-
-  const load = async () => {
-    const response = await fetch(`/tasks/${taskId}`);
-    const task = await response.json();
-    setTask(task);
-    if (["succeeded", "failed"].includes(task.status)) {
-      window.clearInterval(state.pollTimer);
-      await loadHistory();
-    }
+  const STATUS_TEXT = {
+    queued: "排队中",
+    running: "处理中",
+    succeeded: "已完成",
+    failed: "失败",
+  };
+  const STATUS_BADGE = {
+    queued: "badge-accent",
+    running: "badge-accent",
+    succeeded: "badge-success",
+    failed: "badge-danger",
+  };
+  /* 各状态的目标进度（动画最终落点） */
+  const STATUS_PROGRESS = {
+    queued: 12,
+    running: 88,
+    succeeded: 100,
+    failed: 100,
+  };
+  /* 每次轮询在目标进度内平滑爬升的幅度上限 */
+  const PROGRESS_STEP_MAX = 8;
+  const PROGRESS_STEP_MIN = 4;
+  const MODE_TEXT = {
+    summary: "AI 总结",
+    transcript: "逐字稿",
+    interview: "面经提取",
   };
 
-  await load();
-  state.pollTimer = window.setInterval(load, 2500);
-}
+  const VIDEO_EXT_RE = /\.(mp4|webm|m4v|mov|ogv|mkv|avi|flv|ts)$/i;
+  const AUDIO_EXT_RE = /\.(mp3|m4a|wav|aac|ogg|flac|opus|oga|weba)$/i;
 
-const STATUS_TEXT = { queued: "排队中", running: "处理中", succeeded: "已完成", failed: "失败" };
+  /* ======================================================================
+   * 2. DOM 引用
+   * ==================================================================== */
 
-function statusBadge(status) {
-  const span = document.createElement("span");
-  span.className = `badge ${status}`;
-  span.textContent = STATUS_TEXT[status] || status;
-  return span;
-}
+  const $ = (selector) => document.querySelector(selector);
 
-async function loadHistory() {
-  try {
-    const tasks = await fetchJson("/tasks?limit=50", {}, 8000);
-    els.historyList.textContent = "";
+  const els = {
+    // 服务状态
+    statusDot: $("#statusDot"),
+    serviceState: $("#serviceState"),
+
+    // 上传分析
+    uploadForm: $("#uploadForm"),
+    uploadSubmit: $("#uploadSubmit"),
+    dropZone: $("#dropZone"),
+    mediaFile: $("#mediaFile"),
+    fileName: $("#fileName"),
+    uploadMode: $("#uploadMode"),
+    uploadReal: $("#uploadReal"),
+
+    // 链接分析
+    linkForm: $("#linkForm"),
+    linkSubmit: $("#linkSubmit"),
+    videoUrl: $("#videoUrl"),
+    linkMode: $("#linkMode"),
+    linkReal: $("#linkReal"),
+
+    // 任务状态
+    taskStatusBadge: $("#taskStatusBadge"),
+    taskId: $("#taskId"),
+    taskSource: $("#taskSource"),
+    taskMessage: $("#taskMessage"),
+    progressBar: $("#progressBar"),
+    progressPercent: $("#progressPercent"),
+
+    // 结果区
+    summaryOutput: $("#summaryOutput"),
+    transcriptOutput: $("#transcriptOutput"),
+    rawOutput: $("#rawOutput"),
+
+    // 媒体
+    mediaPanel: $("#mediaPanel"),
+    mediaVideo: $("#mediaVideo"),
+    mediaAudio: $("#mediaAudio"),
+    mediaDownloadMain: $("#mediaDownloadMain"),
+    mediaDownloadAudio: $("#mediaDownloadAudio"),
+    mediaHint: $("#mediaHint"),
+
+    // 历史任务
+    historyList: $("#historyList"),
+    historyMessage: $("#historyMessage"),
+    refreshHistory: $("#refreshHistory"),
+
+    // Cookies
+    cookieState: $("#cookieState"),
+    sidebarCookieStatus: $("#sidebarCookieStatus"),
+    cookieText: $("#cookieText"),
+    cookieFile: $("#cookieFile"),
+    cookieMessage: $("#cookieMessage"),
+    qrImage: $("#qrImage"),
+    qrMessage: $("#qrMessage"),
+    saveCookieText: $("#saveCookieText"),
+    verifyCookies: $("#verifyCookies"),
+    uploadCookieFile: $("#uploadCookieFile"),
+    startQrLogin: $("#startQrLogin"),
+    openCookieBrowser: $("#openCookieBrowser"),
+    checkCookieBrowser: $("#checkCookieBrowser"),
+    captureCookieBrowser: $("#captureCookieBrowser"),
+
+    // AI 对话
+    agentContext: $("#agentContext"),
+    chatMessages: $("#chatMessages"),
+    promptChips: $("#promptChips"),
+    chatInput: $("#chatInput"),
+    sendChatBtn: $("#sendChatBtn"),
+
+    // 模型设置
+    modelState: $("#modelState"),
+    llmProvider: $("#llmProvider"),
+    llmBaseUrl: $("#llmBaseUrl"),
+    llmModel: $("#llmModel"),
+    llmApiKey: $("#llmApiKey"),
+    saveModelConfig: $("#saveModelConfig"),
+    clearModelConfig: $("#clearModelConfig"),
+    modelMessage: $("#modelMessage"),
+
+    // 主题切换
+    themeToggle: $("#themeToggle"),
+    themeToggleIcon: $("#themeToggleIcon"),
+    themeToggleText: $("#themeToggleText"),
+  };
+
+  /* ======================================================================
+   * 3. 运行时状态
+   * ==================================================================== */
+
+  const state = {
+    currentTaskId: null, // 当前展示/对话所依据的任务
+    currentTask: null,
+    pollTimer: null,
+    pollAttempts: 0,
+    qrSessionId: null,
+    qrTimer: null,
+    qrAttempts: 0,
+  };
+
+  /* ======================================================================
+   * 4. 通用工具
+   * ==================================================================== */
+
+  const CLIENT_ID_KEY = "videoinsight_client_id";
+
+  /**
+   * 获取本浏览器的持久化客户端身份标识。
+   * 用于任务归属隔离：历史任务/对话/媒体都只允许访问本客户端创建的任务。
+   */
+  function getClientId() {
+    try {
+      let value = localStorage.getItem(CLIENT_ID_KEY);
+      if (!value) {
+        value = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+        localStorage.setItem(CLIENT_ID_KEY, value);
+      }
+      return value;
+    } catch (error) {
+      return `ephemeral-${Math.random().toString(36).slice(2, 12)}`;
+    }
+  }
+
+  /**
+   * 发起 JSON 请求，统一处理超时与错误信息。
+   * 自动附带 X-Client-Id 头，实现任务归属隔离。
+   * @param {string} url 请求地址
+   * @param {RequestInit} [options] fetch 选项
+   * @param {number} [timeoutMs] 超时毫秒数
+   * @returns {Promise<any>} 响应体（非 2xx 时抛出带后端 detail 的 Error）
+   */
+  async function fetchJson(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    const headers = new Headers(options.headers || {});
+    headers.set("X-Client-Id", getClientId());
+    try {
+      const response = await fetch(url, Object.assign({}, options, { headers: headers, signal: controller.signal }));
+      const text = await response.text();
+      let data = {};
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch (error) {
+          data = { detail: text };
+        }
+      }
+      if (!response.ok) {
+        throw new Error(extractError(data, response));
+      }
+      return data;
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        throw new Error("请求超时，请确认服务仍在运行后重试。");
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  /** 从 FastAPI 错误响应中取出可读信息。 */
+  function extractError(data, response) {
+    if (data && data.detail) {
+      return typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
+    }
+    return `请求失败（HTTP ${response.status}）`;
+  }
+
+  /** HTML 转义，防止后端内容被当作标签解析。 */
+  function escapeHtml(text) {
+    return String(text)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  /** 行内 Markdown：加粗 / 斜体 / 行内代码。 */
+  function renderInline(text) {
+    return String(text)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>");
+  }
+
+  /**
+   * 极简 Markdown 渲染（先转义再转标签，仅支持标题/列表/引用/分隔线）。
+   * 用于 AI 总结与 Agent 回答，不依赖任何第三方库。
+   */
+  function renderMarkdown(text) {
+    const lines = escapeHtml(String(text || "")).split("\n");
+    const html = [];
+    let listTag = "";
+
+    const closeList = () => {
+      if (listTag) {
+        html.push(`</${listTag}>`);
+        listTag = "";
+      }
+    };
+
+    lines.forEach((rawLine) => {
+      const line = rawLine.trim();
+      const heading = line.match(/^(#{1,4})\s+(.*)$/);
+      if (heading) {
+        closeList();
+        const level = Math.min(heading[1].length + 1, 4);
+        html.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
+        return;
+      }
+      const quote = line.match(/^&gt;\s?(.*)$/);
+      if (quote) {
+        closeList();
+        html.push(`<blockquote>${renderInline(quote[1])}</blockquote>`);
+        return;
+      }
+      if (/^([-*_])\1{2,}$/.test(line)) {
+        closeList();
+        html.push("<hr />");
+        return;
+      }
+      const bullet = line.match(/^[-*]\s+(.*)$/);
+      const ordered = line.match(/^\d+[.、)]\s+(.*)$/);
+      if (bullet || ordered) {
+        const tag = bullet ? "ul" : "ol";
+        if (listTag !== tag) {
+          closeList();
+          html.push(`<${tag}>`);
+          listTag = tag;
+        }
+        html.push(`<li>${renderInline((bullet || ordered)[1])}</li>`);
+        return;
+      }
+      closeList();
+      if (line) {
+        html.push(`<p>${renderInline(line)}</p>`);
+      }
+    });
+
+    closeList();
+    return html.join("");
+  }
+
+  /** 格式化后端返回的时间字符串。 */
+  function formatTime(value) {
+    if (!value) {
+      return "-";
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return String(value);
+    }
+    const pad = (num) => String(num).padStart(2, "0");
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  /** 截断长文本用于列表展示。 */
+  function truncate(text, max = 42) {
+    const value = String(text || "");
+    return value.length > max ? `${value.slice(0, max)}…` : value;
+  }
+
+  /* ======================================================================
+   * 5. 任务状态与结果渲染
+   * ==================================================================== */
+
+  /**
+   * 更新进度条与任务状态徽章。
+   * @param {string} status queued / running / succeeded / failed
+   * @param {string} message 展示给用户的说明
+   * @param {number} [progress] 直接指定进度百分比（缺省时取该状态的目标值）
+   */
+  function setTaskStatus(status, message, progress) {
+    const target = STATUS_PROGRESS[status] || 0;
+    const percent = progress == null ? target : Math.max(0, Math.min(100, progress));
+    const badgeClass = STATUS_BADGE[status] || "badge-muted";
+    const label = STATUS_TEXT[status] || "待命";
+
+    els.taskStatusBadge.className = `badge ${badgeClass}`;
+    els.taskStatusBadge.textContent = label;
+    els.progressBar.classList.toggle("is-done", status === "succeeded");
+    els.progressBar.classList.toggle("is-failed", status === "failed");
+    els.progressBar.style.width = `${percent}%`;
+    els.progressPercent.textContent = `${Math.round(percent)}%`;
+    els.taskMessage.textContent = message;
+    els.taskMessage.classList.toggle("is-error", status === "failed");
+  }
+
+  /**
+   * 让进度条在当前值与目标值之间平滑递增一段。
+   * 每次调用最多增加 PROGRESS_STEP_MAX，且不会超过目标值。
+   * @param {string} status 当前状态（决定目标值）
+   * @returns {number} 更新后的进度
+   */
+  function easeProgress(status) {
+    const target = STATUS_PROGRESS[status] || 0;
+    const current = parseFloat(els.progressBar.style.width) || 0;
+    if (current >= target) {
+      return current;
+    }
+    const step = PROGRESS_STEP_MIN + Math.random() * (PROGRESS_STEP_MAX - PROGRESS_STEP_MIN);
+    const next = Math.min(target, current + step);
+    els.progressBar.style.width = `${next}%`;
+    els.progressPercent.textContent = `${Math.round(next)}%`;
+    return next;
+  }
+
+  /** 把后端返回的 TaskRecord 渲染到页面上。 */
+  function applyTask(task) {
+    state.currentTask = task;
+    state.currentTaskId = task.task_id;
+
+    els.taskId.textContent = task.task_id;
+    els.taskSource.textContent = task.request ? task.request.url : "-";
+    els.rawOutput.textContent = JSON.stringify(task, null, 2);
+
+    renderMedia(task);
+
+    if (task.status === "queued") {
+      // 保留当前进度宽度，避免打断轮询期间的平滑递增
+      setTaskStatus("queued", "任务已提交，等待处理。", parseFloat(els.progressBar.style.width) || 0);
+      els.summaryOutput.textContent = "任务排队中，完成后将显示 AI 总结。";
+    } else if (task.status === "running") {
+      setTaskStatus("running", "正在下载、转写并分析，较长视频可能需要一两分钟。", parseFloat(els.progressBar.style.width) || 0);
+      els.summaryOutput.textContent = "正在转写/分析中，请稍候…";
+    } else if (task.status === "failed") {
+      setTaskStatus("failed", task.error || "任务失败。");
+      els.summaryOutput.textContent = task.error || "任务失败。";
+    } else if (task.status === "succeeded") {
+      setTaskStatus("succeeded", "分析完成。");
+      els.summaryOutput.innerHTML = renderMarkdown(task.result ? task.result.output : "无结果");
+      els.transcriptOutput.textContent = (task.result && task.result.transcript) || "无逐字稿";
+    }
+
+    updateAgentContext();
+    highlightHistory(task.task_id);
+  }
+
+  /** 渲染媒体播放器与下载链接（仅在任务成功后展示）。 */
+  function renderMedia(task) {
+    els.mediaPanel.hidden = true;
+    els.mediaVideo.hidden = true;
+    els.mediaAudio.hidden = true;
+    els.mediaVideo.removeAttribute("src");
+    els.mediaAudio.removeAttribute("src");
+    els.mediaVideo.load();
+    els.mediaAudio.load();
+    els.mediaDownloadMain.hidden = false;
+    els.mediaDownloadAudio.hidden = true;
+    els.mediaHint.hidden = true;
+    delete els.mediaDownloadMain.dataset.onDemand;
+
+    if (task.status !== "succeeded" || !task.result || !task.result.media) {
+      return;
+    }
+
+    const audioPath = task.result.media.audio_path;
+    if (!audioPath) {
+      return;
+    }
+
+    const taskId = task.task_id;
+    const filename = String(audioPath).split(/[\\/]/).pop() || "media";
+    const isUpload = String(task.request.url).startsWith("upload://");
+
+    if (VIDEO_EXT_RE.test(filename)) {
+      els.mediaVideo.hidden = false;
+      els.mediaVideo.src = `/tasks/${taskId}/media`;
+      els.mediaVideo.load();
+      els.mediaDownloadMain.href = `/tasks/${taskId}/media?download=1`;
+      els.mediaDownloadMain.textContent = `下载视频（${filename}）`;
+    } else if (AUDIO_EXT_RE.test(filename)) {
+      els.mediaAudio.hidden = false;
+      els.mediaAudio.src = `/tasks/${taskId}/media`;
+      els.mediaAudio.load();
+      if (isUpload) {
+        // 上传任务没有源视频，只提供原始音频下载
+        els.mediaDownloadMain.href = `/tasks/${taskId}/media?download=1`;
+        els.mediaDownloadMain.textContent = `下载音频（${filename}）`;
+      } else {
+        els.mediaDownloadMain.href = `/tasks/${taskId}/video?download=1`;
+        els.mediaDownloadMain.textContent = "下载源视频（mp4）";
+        els.mediaDownloadMain.dataset.onDemand = "1";
+        els.mediaDownloadAudio.href = `/tasks/${taskId}/media?download=1`;
+        els.mediaDownloadAudio.textContent = `下载音频（${filename}）`;
+        els.mediaDownloadAudio.hidden = false;
+      }
+    } else {
+      // 扩展名未知：尝试音频播放，同时给出下载入口
+      els.mediaAudio.hidden = false;
+      els.mediaAudio.src = `/tasks/${taskId}/media`;
+      els.mediaAudio.load();
+      els.mediaDownloadMain.href = `/tasks/${taskId}/media?download=1`;
+      els.mediaDownloadMain.textContent = `下载文件（${filename}）`;
+    }
+
+    els.mediaPanel.hidden = false;
+  }
+
+  /* ======================================================================
+   * 6. 任务提交与轮询
+   * ==================================================================== */
+
+  function stopPolling() {
+    window.clearInterval(state.pollTimer);
+    state.pollTimer = null;
+    state.pollAttempts = 0;
+  }
+
+  /**
+   * 轮询任务状态直至终态或达到最大次数。
+   * 进度条从 0% 起步，在 queued/running 期间平滑递增，
+   * 到达 succeeded / failed 时定格到 100%。
+   * @param {string} taskId 任务 ID
+   */
+  function startPolling(taskId) {
+    stopPolling();
+    state.currentTaskId = taskId;
+    els.taskId.textContent = taskId;
+    // 新任务从 0% 起步
+    els.progressBar.style.width = "0%";
+    els.progressPercent.textContent = "0%";
+    setTaskStatus("queued", "任务已提交，正在等待后端处理。");
+
+    const tick = async () => {
+      state.pollAttempts += 1;
+      if (state.pollAttempts > POLL_MAX_ATTEMPTS) {
+        stopPolling();
+        setTaskStatus("failed", "轮询超时：任务仍未完成，请稍后在历史任务中查看结果。");
+        return;
+      }
+      try {
+        const task = await fetchJson(`/tasks/${taskId}`, {}, 10000);
+        // 排队/处理中：平滑递增；终态：直接定格到目标进度
+        if (task.status === "succeeded") {
+          setTaskStatus("succeeded", "分析完成。");
+        } else if (task.status === "failed") {
+          setTaskStatus("failed", task.error || "任务失败。");
+        } else {
+          easeProgress(task.status);
+          applyTask(task);
+          return;
+        }
+        applyTask(task);
+        if (task.status === "succeeded" || task.status === "failed") {
+          stopPolling();
+          await loadHistory();
+        }
+      } catch (error) {
+        stopPolling();
+        setTaskStatus("failed", `获取任务状态失败：${error.message}`);
+      }
+    };
+
+    tick();
+    state.pollTimer = window.setInterval(tick, POLL_INTERVAL_MS);
+  }
+
+  /** 上传文件分析。 */
+  async function submitUpload(event) {
+    event.preventDefault();
+    const file = els.mediaFile.files && els.mediaFile.files[0];
+    if (!file) {
+      setTaskStatus("failed", "请先选择一个音频或视频文件。");
+      return;
+    }
+
+    const form = new FormData();
+    form.append("file", file);
+    form.append("mode", els.uploadMode.value);
+    // 深度思考模式开 = 真实分析（use_mock=false），关 = Mock（use_mock=true）
+    form.append("use_mock", String(!els.uploadReal.checked));
+
+    els.uploadSubmit.disabled = true;
+    els.uploadSubmit.textContent = "上传中...";
+    try {
+      const data = await fetchJson("/analyze-file", { method: "POST", body: form }, 60000);
+      els.taskSource.textContent = file.name;
+      startPolling(data.task_id);
+    } catch (error) {
+      setTaskStatus("failed", `提交失败：${error.message}`);
+    } finally {
+      els.uploadSubmit.disabled = false;
+      els.uploadSubmit.textContent = "开始分析文件";
+    }
+  }
+
+  /** 链接分析。 */
+  async function submitLink(event) {
+    event.preventDefault();
+    const url = els.videoUrl.value.trim();
+    if (!url) {
+      setTaskStatus("failed", "请输入视频链接。");
+      return;
+    }
+
+    els.linkSubmit.disabled = true;
+    els.linkSubmit.textContent = "提交中...";
+    try {
+      const data = await fetchJson(
+        "/analyze",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: url,
+            mode: els.linkMode.value,
+            use_mock: !els.linkReal.checked,
+          }),
+        },
+        20000,
+      );
+      startPolling(data.task_id);
+    } catch (error) {
+      setTaskStatus("failed", `提交失败：${error.message}`);
+    } finally {
+      els.linkSubmit.disabled = false;
+      els.linkSubmit.textContent = "立即链接分析";
+    }
+  }
+
+  /* ======================================================================
+   * 7. 历史任务
+   * ==================================================================== */
+
+  /** 加载最近 50 条任务。 */
+  async function loadHistory() {
+    try {
+      const tasks = await fetchJson("/tasks?limit=50", {}, 10000);
+      renderHistory(tasks);
+    } catch (error) {
+      els.historyList.innerHTML = "";
+      const empty = document.createElement("div");
+      empty.className = "history-empty";
+      empty.textContent = "历史任务加载失败。";
+      els.historyList.appendChild(empty);
+      els.historyMessage.textContent = error.message;
+    }
+  }
+
+  /** 计算任务的显示标题：优先 AI 摘要标题，其次媒体标题，最后模式名。 */
+  function taskDisplayTitle(task) {
+    const result = task.result || {};
+    if (result.title && result.title.trim()) {
+      return result.title.trim();
+    }
+    const mediaTitle = result.media && result.media.title;
+    if (mediaTitle && mediaTitle.trim() && !String(mediaTitle).startsWith("upload://")) {
+      return mediaTitle.trim();
+    }
+    const mode = task.request && task.request.mode;
+    return MODE_TEXT[mode] || mode || "任务";
+  }
+
+  /** 渲染历史任务列表。 */
+  function renderHistory(tasks) {
+    els.historyList.innerHTML = "";
+
     if (!tasks.length) {
-      els.historyMessage.textContent = "暂无历史任务。";
+      const empty = document.createElement("div");
+      empty.className = "history-empty";
+      empty.textContent = "暂无历史任务";
+      els.historyList.appendChild(empty);
+      els.historyMessage.textContent = "";
       return;
     }
-    els.historyMessage.textContent = `共 ${tasks.length} 条（最近 50 条）`;
-    for (const task of tasks) {
-      const item = document.createElement("li");
-      item.className = "history-item";
+    els.historyMessage.textContent = `共 ${tasks.length} 条（最多显示最近 50 条）`;
 
-      const head = document.createElement("div");
-      head.className = "history-item-head";
-      const idEl = document.createElement("span");
-      idEl.className = "history-id";
-      idEl.textContent = task.task_id;
-      head.append(idEl, statusBadge(task.status));
+    tasks.forEach((task) => {
+      const item = document.createElement("div");
+      item.className = "history-mini-item";
+      item.dataset.taskId = task.task_id;
 
-      const urlEl = document.createElement("div");
-      urlEl.className = "history-url";
-      urlEl.textContent = `${task.request?.mode || "?"} · ${task.request?.url || "-"}`;
+      const top = document.createElement("div");
+      top.className = "history-mini-top";
+      const mode = document.createElement("span");
+      mode.className = "history-mini-mode";
+      mode.textContent = truncate(taskDisplayTitle(task), 30);
+      mode.title = taskDisplayTitle(task);
+      const badge = document.createElement("span");
+      badge.className = `badge ${STATUS_BADGE[task.status] || "badge-muted"}`;
+      badge.textContent = STATUS_TEXT[task.status] || task.status;
+      top.append(mode, badge);
 
-      const actions = document.createElement("div");
-      actions.className = "history-actions";
-      const viewBtn = document.createElement("button");
-      viewBtn.type = "button";
-      viewBtn.textContent = "查看";
-      viewBtn.addEventListener("click", () => viewHistoryTask(task.task_id));
-      const deleteBtn = document.createElement("button");
-      deleteBtn.type = "button";
-      deleteBtn.className = "delete-btn";
-      deleteBtn.textContent = "删除";
-      deleteBtn.addEventListener("click", () => deleteHistoryTask(task.task_id));
-      actions.append(viewBtn, deleteBtn);
+      const url = document.createElement("div");
+      url.className = "history-mini-url";
+      url.textContent = truncate(task.request && task.request.url, 36);
+      url.title = (task.request && task.request.url) || "";
 
-      item.append(head, urlEl, actions);
-      els.historyList.append(item);
+      const meta = document.createElement("div");
+      meta.className = "history-mini-meta";
+      const time = document.createElement("span");
+      time.textContent = formatTime(task.created_at);
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "history-delete";
+      del.textContent = "删除";
+      del.addEventListener("click", (event) => {
+        event.stopPropagation();
+        deleteHistoryTask(task.task_id);
+      });
+      meta.append(time, del);
+
+      item.append(top, url, meta);
+      item.addEventListener("click", () => openHistoryTask(task.task_id));
+      els.historyList.appendChild(item);
+    });
+
+    highlightHistory(state.currentTaskId);
+  }
+
+  /** 高亮当前查看的任务。 */
+  function highlightHistory(taskId) {
+    els.historyList.querySelectorAll(".history-mini-item").forEach((item) => {
+      item.classList.toggle("is-active", item.dataset.taskId === taskId);
+    });
+  }
+
+  /** 回看某个历史任务。 */
+  async function openHistoryTask(taskId) {
+    stopPolling();
+    try {
+      const task = await fetchJson(`/tasks/${taskId}`, {}, 10000);
+      applyTask(task);
+      if (task.status === "queued" || task.status === "running") {
+        startPolling(taskId);
+      }
+    } catch (error) {
+      setTaskStatus("failed", `加载任务失败：${error.message}`);
     }
-  } catch (error) {
-    els.historyMessage.textContent = `历史任务加载失败：${error.message}`;
-  }
-}
-
-async function viewHistoryTask(taskId) {
-  window.clearInterval(state.pollTimer);
-  try {
-    const task = await fetchJson(`/tasks/${taskId}`, {}, 10000);
-    setTask(task);
-    const summaryTab = document.querySelector('.tab[data-target="summaryView"]');
-    if (summaryTab) {
-      summaryTab.click();
-    }
-  } catch (error) {
-    setStatus("failed", error.message);
-  }
-}
-
-async function deleteHistoryTask(taskId) {
-  if (!window.confirm(`确认删除任务 ${taskId}？关联的结果文件和临时文件也会一并删除。`)) {
-    return;
-  }
-  try {
-    const response = await fetch(`/tasks/${taskId}`, { method: "DELETE" });
-    if (!response.ok) {
-      throw new Error(`删除失败：${response.status}`);
-    }
-    await loadHistory();
-  } catch (error) {
-    els.historyMessage.textContent = error.message;
-  }
-}
-
-els.mediaFile.addEventListener("change", () => {
-  const file = els.mediaFile.files?.[0];
-  els.fileName.textContent = file ? file.name : "选择音频或视频文件";
-});
-
-els.uploadForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const file = els.mediaFile.files?.[0];
-  if (!file) {
-    setStatus("failed", "请先选择一个音频或视频文件。");
-    return;
   }
 
-  const form = new FormData();
-  form.append("file", file);
-  form.append("mode", els.uploadMode.value);
-  form.append("use_mock", String(!els.uploadReal.checked));
-
-  setStatus("queued", "正在上传文件。");
-  const response = await fetch("/analyze-file", {
-    method: "POST",
-    body: form,
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    setStatus("failed", JSON.stringify(data));
-    return;
-  }
-  await pollTask(data.task_id);
-});
-
-els.linkForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const url = els.videoUrl.value.trim();
-  if (!url) {
-    setStatus("failed", "请输入视频链接。");
-    return;
-  }
-
-  setStatus("queued", "正在提交链接。");
-  const response = await fetch("/analyze", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      url,
-      mode: els.linkMode.value,
-      use_mock: !els.linkReal.checked,
-    }),
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    setStatus("failed", JSON.stringify(data));
-    return;
-  }
-  await pollTask(data.task_id);
-});
-
-document.querySelectorAll(".tab").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
-    document.querySelectorAll(".view").forEach((item) => item.classList.remove("active"));
-    tab.classList.add("active");
-    document.querySelector(`#${tab.dataset.target}`).classList.add("active");
-  });
-});
-
-els.saveCookieText.addEventListener("click", async () => {
-  const text = els.cookieText.value.trim();
-  if (!text) {
-    els.cookieMessage.textContent = "请先粘贴 Cookie 或 Cookie Editor JSON。";
-    return;
-  }
-
-  const form = new FormData();
-  form.append("file", new Blob([text], { type: "text/plain" }), "cookies.txt");
-  els.cookieMessage.textContent = "正在保存粘贴内容...";
-  try {
-    const data = await fetchJson("/cookies", { method: "POST", body: form }, 12000);
-    els.cookieText.value = "";
-    els.cookieMessage.textContent = `已保存 ${data.count} 条 Cookies。`;
-    await refreshCookieStatus();
-    await boot();
-  } catch (error) {
-    els.cookieMessage.textContent = error.message;
-  }
-});
-
-els.verifyCookies.addEventListener("click", async () => {
-  els.cookieMessage.textContent = "正在检查本地 Cookies...";
-  const data = await refreshCookieStatus();
-  if (!data) {
-    return;
-  }
-  const missing = data.missing_important?.length ? `；缺少：${data.missing_important.join(", ")}` : "";
-  els.cookieMessage.textContent = `${describeCookieSummary(data)}${missing}。`;
-});
-
-els.cookieForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const file = els.cookieFile.files?.[0];
-  if (!file) {
-    els.cookieMessage.textContent = "请先选择 cookies.txt。";
-    return;
-  }
-
-  const form = new FormData();
-  form.append("file", file);
-  els.cookieMessage.textContent = "正在保存 cookies...";
-  try {
-    const data = await fetchJson("/cookies", { method: "POST", body: form }, 12000);
-    els.cookieMessage.textContent = `已保存 ${data.count} 条 Cookies，大小 ${data.size} bytes。`;
-    await refreshCookieStatus();
-    await boot();
-  } catch (error) {
-    els.cookieMessage.textContent = error.message;
-  }
-});
-
-els.startQrLogin.addEventListener("click", async () => {
-  window.clearInterval(state.qrPollTimer);
-  state.qrSessionId = null;
-  state.qrStartedAt = null;
-  state.lastTabRequestAt = null;
-  els.qrImage.hidden = true;
-  els.qrImage.removeAttribute("src");
-  els.qrMessage.textContent = "正在打开专用扫码登录窗口...";
-  try {
-    const data = await fetchJson("/cookies/browser/start", { method: "POST" }, 12000);
-    state.qrSessionId = "browser";
-    state.qrStartedAt = Date.now();
-    els.qrMessage.textContent = data.message || "请在新打开的窗口里用抖音 App 扫码登录，本页会自动检测。";
-    state.qrPollTimer = window.setInterval(pollQrLogin, 5000);
-  } catch (error) {
-    els.qrMessage.textContent = error.message;
-  }
-});
-
-async function requestDouyinTab() {
-  const now = Date.now();
-  if (state.lastTabRequestAt && now - state.lastTabRequestAt < 15000) {
-    return;
-  }
-  state.lastTabRequestAt = now;
-  try {
-    await fetchJson("/cookies/browser/start", { method: "POST" }, 12000);
-  } catch {
-    // 忽略重开失败，下一次轮询会重新提示状态。
-  }
-}
-
-async function pollQrLogin() {
-  if (!state.qrSessionId) {
-    return;
-  }
-  if (state.qrStartedAt && Date.now() - state.qrStartedAt > 5 * 60 * 1000) {
-    window.clearInterval(state.qrPollTimer);
-    els.qrMessage.textContent = "扫码检测已暂停，仍未成功时可以重新打开扫码登录窗口。";
-    return;
-  }
-  try {
-    const status = await fetchJson("/cookies/browser/status", {}, 8000);
-    if (!status.running) {
-      els.qrMessage.textContent = "专用登录窗口未连接，请重新打开扫码登录窗口。";
+  /** 删除历史任务并刷新列表。 */
+  async function deleteHistoryTask(taskId) {
+    if (!window.confirm(`确认删除任务 ${taskId}？关联的结果文件与临时文件也会一并删除。`)) {
       return;
     }
-    if (!status.has_douyin_tab) {
-      els.qrMessage.textContent = "专用浏览器已连接，正在打开抖音登录页…";
-      await requestDouyinTab();
+    try {
+      await fetchJson(`/tasks/${taskId}`, { method: "DELETE" }, 15000);
+      if (state.currentTaskId === taskId) {
+        stopPolling();
+        state.currentTaskId = null;
+        state.currentTask = null;
+        updateAgentContext();
+      }
+      await loadHistory();
+    } catch (error) {
+      els.historyMessage.textContent = `删除失败：${error.message}`;
+    }
+  }
+
+  /* ======================================================================
+   * 8. Cookies 授权
+   * ==================================================================== */
+
+  function setCookieMessage(message, kind = "") {
+    els.cookieMessage.textContent = message;
+    els.cookieMessage.className = `cookie-message${kind ? ` is-${kind}` : ""}`;
+  }
+
+  /** 根据后端返回的摘要渲染状态徽章。 */
+  function cookieBadge(summary) {
+    if (!summary || !summary.exists) {
+      return { text: "未配置", cls: "badge-danger" };
+    }
+    if (summary.has_login_cookie) {
+      return { text: `已登录（${summary.count} 条）`, cls: "badge-success" };
+    }
+    return { text: `已配置，无登录态（${summary.count} 条）`, cls: "badge-accent" };
+  }
+
+  /** 拉取 /cookies/status 并刷新两处状态徽章。 */
+  async function refreshCookieStatus() {
+    try {
+      const summary = await fetchJson("/cookies/status", {}, 8000);
+      const badge = cookieBadge(summary);
+      els.cookieState.className = `badge ${badge.cls}`;
+      els.cookieState.textContent = badge.text;
+      els.sidebarCookieStatus.className = `badge ${badge.cls}`;
+      els.sidebarCookieStatus.textContent = badge.text;
+      return summary;
+    } catch (error) {
+      els.cookieState.className = "badge badge-danger";
+      els.cookieState.textContent = "检查失败";
+      els.sidebarCookieStatus.className = "badge badge-danger";
+      els.sidebarCookieStatus.textContent = "检查失败";
+      return null;
+    }
+  }
+
+  /** 描述 Cookie 摘要为一句中文说明。 */
+  function describeCookieSummary(summary) {
+    if (!summary || !summary.exists) {
+      return "未保存 Cookies";
+    }
+    const loginState = summary.has_login_cookie ? "检测到登录态" : "未检测到关键登录态";
+    const present = summary.present_important && summary.present_important.length
+      ? `；已有：${summary.present_important.join(", ")}`
+      : "";
+    const missing = summary.missing_important && summary.missing_important.length
+      ? `；缺少：${summary.missing_important.join(", ")}`
+      : "";
+    return `共 ${summary.count || 0} 条，${loginState}${present}${missing}`;
+  }
+
+  /** 保存粘贴的 Cookie 文本或 JSON。 */
+  async function saveCookieText() {
+    const text = els.cookieText.value.trim();
+    if (!text) {
+      setCookieMessage("请先粘贴 Cookie 或 Cookie Editor JSON。", "error");
       return;
     }
-
-    const data = await fetchJson("/cookies/browser/capture", { method: "POST" }, 20000);
-    if (data.has_login_cookie) {
-      window.clearInterval(state.qrPollTimer);
-      els.qrMessage.textContent = `扫码登录成功，已保存 ${data.count} 条 Cookies。`;
-      els.cookieMessage.textContent = `扫码登录成功，已保存 ${data.count} 条 Cookies。`;
+    const form = new FormData();
+    form.append("file", new Blob([text], { type: "text/plain" }), "cookies.txt");
+    setCookieMessage("正在保存粘贴内容...");
+    try {
+      const data = await fetchJson("/cookies", { method: "POST", body: form }, 15000);
+      els.cookieText.value = "";
+      setCookieMessage(`已保存 ${data.count} 条 Cookies（${data.size} bytes）。`, "ok");
       await refreshCookieStatus();
-      await boot();
+    } catch (error) {
+      setCookieMessage(`保存失败：${error.message}`, "error");
+    }
+  }
+
+  /** 上传 cookies.txt / JSON 文件。 */
+  async function uploadCookieFile() {
+    const file = els.cookieFile.files && els.cookieFile.files[0];
+    if (!file) {
+      setCookieMessage("请先选择 cookies.txt 或 Cookie Editor JSON 文件。", "error");
       return;
     }
-    els.qrMessage.textContent = `窗口已连接，等待扫码确认；当前抓到 ${data.count} 条非登录 Cookies，未覆盖本地文件。`;
-  } catch (error) {
-    els.qrMessage.textContent = error.message;
+    const form = new FormData();
+    form.append("file", file);
+    setCookieMessage("正在保存上传文件...");
+    try {
+      const data = await fetchJson("/cookies", { method: "POST", body: form }, 15000);
+      setCookieMessage(`已保存 ${data.count} 条 Cookies（${data.size} bytes）。`, "ok");
+      await refreshCookieStatus();
+    } catch (error) {
+      setCookieMessage(`保存失败：${error.message}`, "error");
+    }
   }
-}
 
-els.openCookieBrowser.addEventListener("click", async () => {
-  els.cookieMessage.textContent = "正在打开专用登录窗口...";
-  try {
-    const data = await fetchJson("/cookies/browser/start", { method: "POST" });
-    els.cookieMessage.textContent =
-      data.message || "请在新打开的浏览器窗口登录抖音，登录后点击“检查窗口”或“抓取登录态”。";
-  } catch (error) {
-    els.cookieMessage.textContent = error.message;
+  function stopQrPolling() {
+    window.clearInterval(state.qrTimer);
+    state.qrTimer = null;
+    state.qrSessionId = null;
+    state.qrAttempts = 0;
   }
-});
 
-els.checkCookieBrowser.addEventListener("click", async () => {
-  els.cookieMessage.textContent = "正在检查专用登录窗口...";
-  try {
-    const data = await fetchJson("/cookies/browser/status", {}, 8000);
-    if (!data.running) {
-      els.cookieMessage.textContent = "专用登录窗口未连接，请先点击“打开登录窗口”。";
+  function setQrMessage(message) {
+    els.qrMessage.hidden = false;
+    els.qrMessage.textContent = message;
+  }
+
+  /** 启动扫码登录会话并轮询状态。 */
+  async function startQrLogin() {
+    stopQrPolling();
+    els.qrImage.hidden = true;
+    els.qrImage.removeAttribute("src");
+    setQrMessage("正在启动扫码登录窗口...");
+
+    try {
+      const session = await fetchJson("/cookies/qr/start", { method: "POST" }, 15000);
+      state.qrSessionId = session.session_id;
+      state.qrAttempts = 0;
+      // 后端当前基于专用浏览器窗口，仅在返回二维码图片地址时展示图片
+      const imageUrl = session.qr_image_url || session.qrcode_url || (session.qr && session.qr.image_url);
+      if (imageUrl) {
+        els.qrImage.src = imageUrl;
+        els.qrImage.hidden = false;
+      }
+      setQrMessage(session.message || "请在打开的窗口中扫码登录，本页会自动检测。");
+      state.qrTimer = window.setInterval(pollQrLogin, QR_POLL_INTERVAL_MS);
+    } catch (error) {
+      setQrMessage(`启动失败：${error.message}`);
+    }
+  }
+
+  /** 轮询扫码登录状态直至完成或超时。 */
+  async function pollQrLogin() {
+    if (!state.qrSessionId) {
       return;
     }
-    const tabText = data.has_douyin_tab ? "已找到抖音页面" : "未找到抖音页面，可再次点击“打开登录窗口”打开抖音页";
-    els.cookieMessage.textContent = `DevTools 已连接，${tabText}，标签页 ${data.tabs.length} 个。`;
-  } catch (error) {
-    els.cookieMessage.textContent = error.message;
+    state.qrAttempts += 1;
+    if (state.qrAttempts > QR_POLL_MAX_ATTEMPTS) {
+      stopQrPolling();
+      setQrMessage("扫码检测已暂停（超过 5 分钟），如需继续请重新点击「扫码登录」。");
+      return;
+    }
+    try {
+      const status = await fetchJson(`/cookies/qr/${state.qrSessionId}/status`, {}, 10000);
+      if (status.completed) {
+        stopQrPolling();
+        els.qrImage.hidden = true;
+        setQrMessage(status.message || "扫码登录成功，Cookies 已保存。");
+        setCookieMessage(status.message || "扫码登录成功，Cookies 已保存。", "ok");
+        await refreshCookieStatus();
+        return;
+      }
+      setQrMessage(status.message || "等待扫码确认...");
+    } catch (error) {
+      stopQrPolling();
+      setQrMessage(`检测失败：${error.message}`);
+    }
   }
-});
 
-els.captureCookieBrowser.addEventListener("click", async () => {
-  els.cookieMessage.textContent = "正在抓取专用窗口里的 douyin.com cookies...";
-  try {
-    const data = await fetchJson("/cookies/browser/capture", { method: "POST" }, 20000);
-    const loginState = data.has_login_cookie ? "检测到登录态" : "未检测到关键登录态";
-    const missing = data.missing_important?.length ? `；缺少：${data.missing_important.join(", ")}` : "";
-    const savedText = data.saved ? `已保存 ${data.count} 条 cookies` : `抓到 ${data.count} 条 cookies，未覆盖本地文件`;
-    els.cookieMessage.textContent = `${savedText}，${loginState}${missing}。`;
+  /** 打开专用登录窗口。 */
+  async function openCookieBrowser() {
+    setCookieMessage("正在打开专用登录窗口...");
+    try {
+      const data = await fetchJson("/cookies/browser/start", { method: "POST" }, 15000);
+      setCookieMessage(data.message || "请在新打开的浏览器窗口登录抖音，登录后点击「抓取登录态」。");
+    } catch (error) {
+      setCookieMessage(`打开失败：${error.message}`, "error");
+    }
+  }
+
+  /** 检查专用登录窗口连接状态。 */
+  async function checkCookieBrowser() {
+    setCookieMessage("正在检查专用登录窗口...");
+    try {
+      const data = await fetchJson("/cookies/browser/status", {}, 10000);
+      if (!data.running) {
+        setCookieMessage("专用登录窗口未连接，请先点击「打开登录窗口」。", "error");
+        return;
+      }
+      const tabText = data.has_douyin_tab ? "已找到抖音页面" : "未找到抖音页面，可再次点击「打开登录窗口」";
+      const count = Array.isArray(data.tabs) ? data.tabs.length : 0;
+      setCookieMessage(`DevTools 已连接（端口 ${data.port}），${tabText}，标签页 ${count} 个。`);
+    } catch (error) {
+      setCookieMessage(`检查失败：${error.message}`, "error");
+    }
+  }
+
+  /** 抓取专用窗口中的登录态。 */
+  async function captureCookieBrowser() {
+    setCookieMessage("正在抓取专用窗口里的 douyin.com cookies...");
+    try {
+      const data = await fetchJson("/cookies/browser/capture", { method: "POST" }, CAPTURE_TIMEOUT_MS);
+      const savedText = data.saved
+        ? `已保存 ${data.count} 条 cookies`
+        : `抓到 ${data.count} 条 cookies，未覆盖本地文件`;
+      const loginState = data.has_login_cookie ? "检测到登录态" : "未检测到关键登录态";
+      const missing = data.missing_important && data.missing_important.length
+        ? `；缺少：${data.missing_important.join(", ")}`
+        : "";
+      setCookieMessage(`${savedText}，${loginState}${missing}。`, data.saved ? "ok" : "error");
+      await refreshCookieStatus();
+    } catch (error) {
+      setCookieMessage(`抓取失败：${error.message}`, "error");
+    }
+  }
+
+  /* ======================================================================
+   * 10. AI Agent 对话
+   * ==================================================================== */
+
+  /** 更新对话框右上角的上下文徽章。 */
+  function updateAgentContext() {
+    if (!loadModelConfig()) {
+      els.agentContext.className = "badge badge-danger";
+      els.agentContext.textContent = "未配置 API Key";
+      els.agentContext.title = "请先在模型设置中配置你的 API Key";
+      return;
+    }
+    const task = state.currentTask;
+    if (!task) {
+      els.agentContext.className = "badge badge-muted";
+      els.agentContext.textContent = "未选择任务";
+      return;
+    }
+    if (task.status !== "succeeded") {
+      els.agentContext.className = "badge badge-accent";
+      els.agentContext.textContent = `任务${STATUS_TEXT[task.status] || task.status}，暂不可提问`;
+      return;
+    }
+    const title = (task.result && task.result.media && task.result.media.title) || task.task_id.slice(0, 8);
+    const config = loadModelConfig();
+    const modelLabel = config && config.model ? ` · ${config.model}` : "";
+    els.agentContext.className = "badge badge-agent";
+    els.agentContext.textContent = `上下文：${truncate(title, 16)}${modelLabel}`;
+    els.agentContext.title = task.task_id;
+  }
+
+  /**
+   * 追加一条气泡消息。
+   * @param {"user"|"agent"} role 发言角色
+   * @param {string} text 文本内容
+   * @param {{error?: boolean, thinking?: boolean}} [options] 附加样式
+   * @returns {HTMLElement} 气泡内容节点，便于后续更新
+   */
+  function appendBubble(role, text, options = {}) {
+    const bubble = document.createElement("div");
+    bubble.className = `chat-bubble ${role}`;
+    if (options.error) {
+      bubble.classList.add("is-error");
+    }
+
+    const avatar = document.createElement("div");
+    avatar.className = "chat-avatar";
+    avatar.textContent = role === "user" ? "我" : "AI";
+
+    const content = document.createElement("div");
+    content.className = "chat-content";
+    if (options.thinking) {
+      content.classList.add("is-thinking");
+      content.textContent = text;
+    } else if (role === "agent") {
+      content.innerHTML = renderMarkdown(text);
+    } else {
+      content.textContent = text;
+    }
+
+    bubble.append(avatar, content);
+    els.chatMessages.appendChild(bubble);
+    scrollChatToBottom();
+    return content;
+  }
+
+  function scrollChatToBottom() {
+    els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+  }
+
+  /** 切换发送按钮与快捷 Prompt 的可用状态。 */
+  function setChatBusy(busy) {
+    els.sendChatBtn.disabled = busy;
+    els.sendChatBtn.textContent = busy ? "思考中..." : "发送";
+    els.promptChips.querySelectorAll(".chip-btn").forEach((chip) => {
+      chip.disabled = busy;
+    });
+  }
+
+  /**
+   * 发送问题到后端 /tasks/{id}/chat。
+   * 未配置用户自己的 API Key 时，先提示去「模型设置」配置，不发起对话。
+   * @param {string} rawQuestion 用户问题
+   */
+  async function sendChat(rawQuestion) {
+    const question = String(rawQuestion || "").trim();
+    if (!question) {
+      return;
+    }
+
+    // 用户必须配置自己的 LLM API Key 才能对话
+    const llmConfig = loadModelConfig();
+    if (!llmConfig) {
+      appendBubble(
+        "agent",
+        "开始对话前，请先在左侧「⚙️ 模型设置」中填写你自己的模型 API Key（如 DeepSeek / OpenAI）。\n\n配置完成后即可使用你自己的模型进行 AI 对话。",
+        { error: true },
+      );
+      scrollToSettings();
+      els.chatInput.focus();
+      return;
+    }
+
+    let task = state.currentTask;
+    if (!task) {
+      // 未选中任务时，自动拾取最近一个成功任务作为对话上下文
+      task = await pickRecentSucceededTask();
+      if (task) {
+        state.currentTask = task;
+        state.currentTaskId = task.task_id;
+        updateAgentContext();
+        highlightHistory(task.task_id);
+      }
+    }
+    if (!task) {
+      appendBubble("agent", "还没有可对话的分析结果。请先上传文件或提交链接完成一次分析，完成后我就能基于转写稿回答你的问题。", { error: true });
+      return;
+    }
+    if (task.status !== "succeeded") {
+      appendBubble(
+        "agent",
+        `当前任务还${STATUS_TEXT[task.status] || "未完成"}，请等分析完成后再提问。`,
+        { error: true },
+      );
+      return;
+    }
+
+    appendBubble("user", question);
+    els.chatInput.value = "";
+    const thinking = appendBubble("agent", "思考中...", { thinking: true });
+    setChatBusy(true);
+
+    try {
+      // 携带用户自备模型配置，让后端优先使用用户的 LLM
+      const data = await fetchJson(
+        `/tasks/${task.task_id}/chat`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            Object.assign(
+              { question: question },
+              {
+                llm_provider: llmConfig.provider,
+                llm_base_url: llmConfig.baseUrl,
+                llm_model: llmConfig.model,
+                llm_api_key: llmConfig.apiKey,
+              },
+            ),
+          ),
+        },
+        120000,
+      );
+      thinking.classList.remove("is-thinking");
+      thinking.innerHTML = renderMarkdown(data.answer || "（后端未返回回答内容）");
+      scrollChatToBottom();
+    } catch (error) {
+      thinking.classList.remove("is-thinking");
+      thinking.textContent = `提问失败：${error.message}`;
+      thinking.parentElement.classList.add("is-error");
+      scrollChatToBottom();
+    } finally {
+      setChatBusy(false);
+      els.chatInput.focus();
+    }
+  }
+
+  /** 平滑滚动到模型设置区。 */
+  function scrollToSettings() {
+    const target = document.getElementById("settings");
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  /** 从历史任务中取最近一个成功任务，作为默认对话上下文。 */
+  async function pickRecentSucceededTask() {
+    try {
+      const tasks = await fetchJson("/tasks?limit=10", {}, 10000);
+      return tasks.find((item) => item.status === "succeeded") || null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
+   * 快捷 Prompt 入口：由页面上的 chip 按钮（onclick）调用。
+   * @param {string} promptText 预设问题文本
+   */
+  window.sendPrompt = function sendPrompt(promptText) {
+    sendChat(promptText);
+  };
+
+  /* ======================================================================
+   * 9. 模型设置（用户自备 LLM / API Key）
+   * ==================================================================== */
+
+  const MODEL_CONFIG_KEY = "videoinsight_llm_config";
+  const PROVIDER_DEFAULTS = {
+    deepseek: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+    openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+    custom: { baseUrl: "", model: "" },
+  };
+
+  /** 读取本地保存的模型配置；未配置返回 null。 */
+  function loadModelConfig() {
+    try {
+      const raw = localStorage.getItem(MODEL_CONFIG_KEY);
+      if (!raw) {
+        return null;
+      }
+      const parsed = JSON.parse(raw);
+      return parsed && parsed.apiKey ? parsed : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /** 把表单内容填入 UI。 */
+  function fillModelForm(config) {
+    const provider = (config && config.provider) || "deepseek";
+    const defaults = PROVIDER_DEFAULTS[provider] || PROVIDER_DEFAULTS.custom;
+    els.llmProvider.value = provider;
+    els.llmBaseUrl.value = (config && config.baseUrl) || defaults.baseUrl;
+    els.llmModel.value = (config && config.model) || defaults.model;
+    els.llmApiKey.value = (config && config.apiKey) || "";
+  }
+
+  /** provider 切换时：仅在输入为空或仍为旧默认值时才替换为新的默认 base_url / model。 */
+  function applyProviderDefaults(provider, previous) {
+    const prevDefaults = PROVIDER_DEFAULTS[previous] || PROVIDER_DEFAULTS.custom;
+    const defaults = PROVIDER_DEFAULTS[provider] || PROVIDER_DEFAULTS.custom;
+    if (!els.llmBaseUrl.value || (previous && els.llmBaseUrl.value === prevDefaults.baseUrl)) {
+      els.llmBaseUrl.value = defaults.baseUrl;
+    }
+    if (!els.llmModel.value || (previous && els.llmModel.value === prevDefaults.model)) {
+      els.llmModel.value = defaults.model;
+    }
+  }
+
+  /** 更新右上角状态徽章与提示。 */
+  function renderModelState() {
+    const config = loadModelConfig();
+    if (!config) {
+      els.modelState.className = "badge badge-danger";
+      els.modelState.textContent = "未配置，对话不可用";
+      els.modelState.title = "请先配置你的 API Key 才能使用 AI 对话";
+      return;
+    }
+    els.modelState.className = "badge badge-success";
+    const providerLabel = {
+      deepseek: "DeepSeek",
+      openai: "OpenAI",
+      custom: "自定义",
+    }[config.provider] || config.provider;
+    els.modelState.textContent = `${providerLabel} · ${config.model || "默认模型"}`;
+    els.modelState.title = config.baseUrl || "";
+  }
+
+  /** 保存表单配置到 localStorage。 */
+  function saveModelConfig() {
+    const provider = els.llmProvider.value;
+    const baseUrl = els.llmBaseUrl.value.trim();
+    const model = els.llmModel.value.trim();
+    const apiKey = els.llmApiKey.value.trim();
+    if (!apiKey) {
+      setModelMessage("请填写 API Key。", "error");
+      return;
+    }
+    if (provider === "custom" && !baseUrl) {
+      setModelMessage("自定义服务商需要填写 API Base URL。", "error");
+      return;
+    }
+    try {
+      localStorage.setItem(
+        MODEL_CONFIG_KEY,
+        JSON.stringify({ provider, baseUrl, model, apiKey }),
+      );
+    } catch (error) {
+      setModelMessage(`保存失败：${error.message}`, "error");
+      return;
+    }
+    renderModelState();
+    updateAgentContext();
+    setModelMessage(`已保存，AI 对话将使用 ${model || provider} 模型。`, "ok");
+  }
+
+  /** 清除本地模型配置，恢复服务端默认。 */
+  function clearModelConfig() {
+    try {
+      localStorage.removeItem(MODEL_CONFIG_KEY);
+    } catch (error) {
+      // 忽略清除失败
+    }
+    fillModelForm(null);
+    renderModelState();
+    updateAgentContext();
+    setModelMessage("已清除本地配置。重新配置 API Key 后即可恢复 AI 对话。", "ok");
+  }
+
+  function setModelMessage(message, kind = "") {
+    els.modelMessage.textContent = message;
+    els.modelMessage.className = `cookie-message${kind ? ` is-${kind}` : ""}`;
+  }
+
+  function bindModelSettings() {
+    let previousProvider = els.llmProvider.value;
+    els.llmProvider.addEventListener("change", () => {
+      const next = els.llmProvider.value;
+      applyProviderDefaults(next, previousProvider);
+      previousProvider = next;
+    });
+    els.saveModelConfig.addEventListener("click", saveModelConfig);
+    els.clearModelConfig.addEventListener("click", clearModelConfig);
+    fillModelForm(loadModelConfig());
+    renderModelState();
+  }
+
+  /* ======================================================================
+   * 9.5 主题切换（深色 / 浅色）
+   * ==================================================================== */
+
+  const THEME_KEY = "videoinsight_theme";
+
+  /** 应用主题到 <html> 并同步按钮文案。 */
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    const isDark = theme !== "light";
+    els.themeToggleIcon.textContent = isDark ? "🌙" : "☀️";
+    els.themeToggleText.textContent = isDark ? "深色模式" : "浅色模式";
+  }
+
+  /** 读取本地主题偏好，默认深色。 */
+  function loadTheme() {
+    try {
+      return localStorage.getItem(THEME_KEY) || "dark";
+    } catch (error) {
+      return "dark";
+    }
+  }
+
+  function bindThemeToggle() {
+    applyTheme(loadTheme());
+    els.themeToggle.addEventListener("click", () => {
+      const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+      applyTheme(next);
+      try {
+        localStorage.setItem(THEME_KEY, next);
+      } catch (error) {
+        // 忽略存储失败
+      }
+    });
+  }
+
+  /* ======================================================================
+   * 11. 服务状态
+   * ==================================================================== */
+
+  /** 拉取 /health 并展示服务与默认模式。 */
+  async function refreshServiceState() {
+    try {
+      const health = await fetchJson("/health", {}, 8000);
+      const cookieState = health.cookies_file
+        ? "cookies 文件已配置"
+        : health.cookies_from_browser
+          ? `浏览器 cookies：${health.cookies_from_browser}`
+          : "未配置 cookies";
+      els.statusDot.classList.remove("is-offline");
+      els.serviceState.textContent = `服务正常 · 默认 ${health.mock_mode ? "Mock" : "真实"} 模式 · ${cookieState}`;
+    } catch (error) {
+      els.statusDot.classList.add("is-offline");
+      els.serviceState.textContent = "本地服务未连接";
+    }
+  }
+
+  /* ======================================================================
+   * 12. 事件绑定与初始化
+   * ==================================================================== */
+
+  function bindTabs() {
+    document.querySelectorAll(".tab-btn").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll(".tab-btn").forEach((item) => item.classList.remove("active"));
+        button.classList.add("active");
+        const target = document.getElementById(button.dataset.target);
+        ["summaryOutput", "transcriptOutput", "rawOutput"].forEach((id) => {
+          const panel = document.getElementById(id);
+          if (panel) {
+            panel.style.display = panel === target ? "block" : "none";
+          }
+        });
+      });
+    });
+  }
+
+  function bindSidebarNav() {
+    document.querySelectorAll(".sidebar-nav-item").forEach((item) => {
+      item.addEventListener("click", () => {
+        document.querySelectorAll(".sidebar-nav-item").forEach((nav) => nav.classList.remove("active"));
+        item.classList.add("active");
+      });
+    });
+  }
+
+  function bindDropZone() {
+    const setFile = (file) => {
+      if (!file) {
+        return;
+      }
+      try {
+        const transfer = new DataTransfer();
+        transfer.items.add(file);
+        els.mediaFile.files = transfer.files;
+      } catch (error) {
+        // 部分浏览器不允许写入 input.files，此时仅提示文件名
+      }
+      els.fileName.textContent = file.name;
+    };
+
+    ["dragenter", "dragover"].forEach((name) => {
+      els.dropZone.addEventListener(name, (event) => {
+        event.preventDefault();
+        els.dropZone.classList.add("dragover");
+      });
+    });
+    ["dragleave", "dragend"].forEach((name) => {
+      els.dropZone.addEventListener(name, () => els.dropZone.classList.remove("dragover"));
+    });
+    els.dropZone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      els.dropZone.classList.remove("dragover");
+      const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+      setFile(file);
+    });
+    // 阻止拖放到页面其他位置时浏览器直接打开文件
+    window.addEventListener("dragover", (event) => event.preventDefault());
+    window.addEventListener("drop", (event) => event.preventDefault());
+
+    els.mediaFile.addEventListener("change", () => {
+      const file = els.mediaFile.files && els.mediaFile.files[0];
+      els.fileName.textContent = file ? file.name : "点击或拖入音视频文件";
+    });
+  }
+
+  function bindEvents() {
+    els.uploadForm.addEventListener("submit", submitUpload);
+    els.linkForm.addEventListener("submit", submitLink);
+    bindTabs();
+    bindSidebarNav();
+    bindDropZone();
+
+    els.refreshHistory.addEventListener("click", loadHistory);
+
+    els.saveCookieText.addEventListener("click", saveCookieText);
+    els.verifyCookies.addEventListener("click", async () => {
+      setCookieMessage("正在检查本地 Cookies...");
+      const data = await refreshCookieStatus();
+      if (data) {
+        setCookieMessage(`${describeCookieSummary(data)}。`);
+      } else {
+        setCookieMessage("检查 Cookies 失败，请确认服务已启动。", "error");
+      }
+    });
+    els.uploadCookieFile.addEventListener("click", uploadCookieFile);
+    els.startQrLogin.addEventListener("click", startQrLogin);
+    els.openCookieBrowser.addEventListener("click", openCookieBrowser);
+    els.checkCookieBrowser.addEventListener("click", checkCookieBrowser);
+    els.captureCookieBrowser.addEventListener("click", captureCookieBrowser);
+
+    els.sendChatBtn.addEventListener("click", () => sendChat(els.chatInput.value));
+    els.chatInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        sendChat(els.chatInput.value);
+      }
+    });
+    els.promptChips.addEventListener("click", (event) => {
+      const chip = event.target.closest(".chip-btn");
+      if (chip && !chip.disabled && chip.dataset.prompt) {
+        sendChat(chip.dataset.prompt);
+      }
+    });
+
+    els.mediaDownloadMain.addEventListener("click", () => {
+      if (els.mediaDownloadMain.dataset.onDemand === "1") {
+        els.mediaHint.hidden = false;
+        els.mediaHint.textContent = "正在下载源视频，短视频约需 5~60 秒，请稍候…";
+      }
+    });
+
+    bindModelSettings();
+    bindThemeToggle();
+  }
+
+  /** 页面初始化。 */
+  async function boot() {
+    bindEvents();
+    updateAgentContext();
+    await refreshServiceState();
     await refreshCookieStatus();
-    await boot();
-  } catch (error) {
-    els.cookieMessage.textContent = error.message;
-  }
-});
-
-els.refreshHistory.addEventListener("click", loadHistory);
-
-els.mediaDownloadMain.addEventListener("click", () => {
-  if (els.mediaDownloadMain.dataset.onDemand === "1") {
-    els.mediaHint.hidden = false;
-    els.mediaHint.textContent = "正在下载源视频，短视频约需 5~60 秒，请稍候…";
-  }
-});
-
-async function boot() {
-  try {
-    const response = await fetch("/health");
-    const health = await response.json();
-    await refreshCookieStatus();
-    const cookieState = health.cookies_file
-      ? "cookies 文件已配置"
-      : health.cookies_from_browser
-        ? `浏览器 cookies: ${health.cookies_from_browser}`
-        : "未配置 cookies";
-    els.serviceState.textContent = `服务正常 · 默认 ${health.mock_mode ? "Mock" : "真实"} 模式 · ${cookieState}`;
     await loadHistory();
-  } catch {
-    els.serviceState.textContent = "本地服务未连接";
   }
-}
 
-boot();
+  boot();
+})();

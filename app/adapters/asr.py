@@ -12,7 +12,7 @@ from app.schemas import TranscriptSegment
 class MockTranscriber:
     def transcribe(self, audio_path: Path | None, task_id: str) -> list[TranscriptSegment]:
         return [
-            TranscriptSegment(start=0, end=18, text="大家好，今天分享一次 AI 产品经理岗位的面试复盘。"),
+            TranscriptSegment(start=0, end=18, text="大家好，今天分享一次 AI 产品经理岗位的面试经验。"),
             TranscriptSegment(start=18, end=56, text="面试官先问了项目背景，我介绍了视频分析助手从链接解析、语音转写到结构化总结的流程。"),
             TranscriptSegment(start=56, end=104, text="随后被问到如何控制模型幻觉，我回答会把事实核查拆成声明抽取、联网搜索、证据比对和风险标注四步。"),
             TranscriptSegment(start=104, end=146, text="最后讨论了合规问题，包括用户授权、原始音视频自动删除和敏感内容审核。"),

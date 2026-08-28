@@ -9,3 +9,8 @@ data/logs/
 data/*.db
 media/
 *.pyc
+
+# 本地临时脚本与工具记忆
+.workbuddy/
+_smoke_*.py
+_verify_*.py

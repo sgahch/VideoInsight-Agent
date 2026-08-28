@@ -1,0 +1,960 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>VideoInsight Agent - 沉浸式 AI 视频分析平台</title>
+  
+  <style>
+    /* ==========================================================================
+       设计系统变量 (Design Tokens) - 沉浸暗黑 Focus 调色板 + Notion 极简质感
+       ========================================================================== */
+    :root {
+      --bg: #0b0f17;
+      --bg-accent: #111827;
+      --surface: #151d2a;
+      --surface-hover: #1c2638;
+      --surface-muted: #1e293b;
+      --border: #232d3f;
+      --border-focus: #f59e0b;
+      
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --text-dim: #6b7280;
+      
+      /* 沉浸式焦点色 (琥珀金 & 科技青) */
+      --accent: #f59e0b;
+      --accent-hover: #d97706;
+      --accent-soft: rgba(245, 158, 11, 0.12);
+      --agent-accent: #38bdf8;
+      --agent-soft: rgba(56, 189, 248, 0.12);
+      
+      --danger: #ef4444;
+      --danger-soft: rgba(239, 68, 68, 0.12);
+      --success: #10b981;
+      --success-soft: rgba(16, 185, 129, 0.12);
+      
+      --radius: 12px;
+      --radius-sm: 8px;
+      --radius-pill: 999px;
+      
+      --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+      --shadow-glow: 0 0 20px rgba(245, 158, 11, 0.15);
+      --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.6;
+      min-height: 100vh;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* 滚动条美化 */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+    /* 通用基础组件 */
+    button, input, select, textarea {
+      font: inherit;
+      color: inherit;
+      background: transparent;
+      border: none;
+      outline: none;
+    }
+
+    button { cursor: pointer; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: var(--radius-pill);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .badge-accent { background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(245, 158, 11, 0.2); }
+    .badge-agent { background: var(--agent-soft); color: var(--agent-accent); border: 1px solid rgba(56, 189, 248, 0.2); }
+    .badge-success { background: var(--success-soft); color: var(--success); }
+    .badge-danger { background: var(--danger-soft); color: var(--danger); }
+
+    /* ==========================================================================
+       PC 端布局：Notion 极简侧边栏 (Side Nav + Main Canvas)
+       ========================================================================== */
+    .app-layout {
+      display: grid;
+      grid-template-columns: 300px minmax(0, 1fr);
+      min-height: 100vh;
+      background: var(--bg);
+    }
+
+    /* 左侧 Notion 极简导航栏 */
+    .notion-sidebar {
+      background: var(--bg-accent);
+      border-right: 1px solid var(--border);
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+    }
+
+    .brand-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 8px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand-logo {
+      width: 36px;
+      height: 36px;
+      border-radius: var(--radius-sm);
+      background: linear-gradient(135deg, var(--accent) 0%, #d97706 100%);
+      display: grid;
+      place-items: center;
+      color: #000;
+      font-weight: 900;
+      box-shadow: var(--shadow-glow);
+    }
+    .brand-title {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .brand-status {
+      font-size: 12px;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success);
+    }
+
+    /* Notion 侧边栏菜单分类 */
+    .sidebar-section-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      letter-spacing: 0.08em;
+      padding: 0 8px;
+      margin-bottom: 8px;
+    }
+
+    .sidebar-nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: var(--radius-sm);
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s ease;
+    }
+    .sidebar-nav-item:hover, .sidebar-nav-item.active {
+      background: var(--surface-hover);
+      color: var(--text);
+    }
+    .sidebar-nav-item.active {
+      background: var(--surface);
+      border-left: 3px solid var(--accent);
+      padding-left: 9px;
+    }
+
+    /* 侧边栏中的任务历史列表 */
+    .history-mini-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .history-mini-item {
+      padding: 10px;
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      transition: all 0.2s;
+    }
+    .history-mini-item:hover {
+      border-color: var(--text-dim);
+      transform: translateX(2px);
+    }
+
+    /* 右侧主工作画布 */
+    .main-canvas {
+      padding: 32px 40px;
+      max-width: 1200px;
+      margin: 0 auto;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+
+    /* 面板面板库 */
+    .card-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      box-shadow: var(--shadow);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .card-title {
+      font-size: 16px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* 双栏输入工作台 Grid */
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+    }
+
+    /* 表单控件 */
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .form-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+    .form-input, .form-select, .form-textarea {
+      width: 100%;
+      padding: 10px 14px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      transition: border-color 0.2s;
+    }
+    .form-input:focus, .form-select:focus, .form-textarea:focus {
+      border-color: var(--border-focus);
+    }
+    
+    /* 拖拽上传框 */
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      background: rgba(11, 15, 23, 0.5);
+      padding: 28px 16px;
+      text-align: center;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s;
+    }
+    .drop-zone:hover {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .drop-zone.dragover {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .drop-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: var(--surface);
+      display: grid;
+      place-items: center;
+      color: var(--accent);
+    }
+
+    /* 按钮 */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 18px;
+      border-radius: var(--radius-sm);
+      font-weight: 600;
+      font-size: 13px;
+      background: var(--accent);
+      color: #000;
+      box-shadow: 0 2px 8px rgba(245, 158, 11, 0.25);
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn-secondary {
+      background: var(--surface-muted);
+      color: var(--text);
+      border: 1px solid var(--border);
+      box-shadow: none;
+    }
+    .btn-secondary:hover { background: var(--surface-hover); }
+    .btn-agent {
+      background: var(--agent-accent);
+      box-shadow: none;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Switch 拨动开关 */
+    .switch-label {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .switch-input { display: none; }
+    .switch-slider {
+      width: 36px;
+      height: 20px;
+      background: var(--border);
+      border-radius: var(--radius-pill);
+      position: relative;
+      transition: 0.2s;
+    }
+    .switch-slider::before {
+      content: "";
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      left: 3px;
+      top: 3px;
+      background: var(--text);
+      border-radius: 50%;
+      transition: 0.2s;
+    }
+    .switch-input:checked + .switch-slider { background: var(--accent); }
+    .switch-input:checked + .switch-slider::before { transform: translateX(16px); background: #000; }
+
+    /* 进度条与状态 */
+    .progress-bar-bg {
+      height: 8px;
+      background: var(--bg);
+      border-radius: var(--radius-pill);
+      overflow: hidden;
+      margin: 12px 0 6px;
+      border: 1px solid var(--border);
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent) 0%, #38bdf8 100%);
+      border-radius: var(--radius-pill);
+      transition: width 0.3s ease;
+    }
+
+    /* 选项卡 (Segmented Tabs) */
+    .tab-nav {
+      display: flex;
+      gap: 4px;
+      background: var(--bg);
+      padding: 4px;
+      border-radius: var(--radius-pill);
+      border: 1px solid var(--border);
+      width: fit-content;
+      margin-bottom: 16px;
+    }
+    .tab-btn {
+      padding: 6px 16px;
+      border-radius: var(--radius-pill);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+    .tab-btn.active {
+      background: var(--surface);
+      color: var(--accent);
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }
+
+    .output-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 16px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      min-height: 220px;
+      max-height: 400px;
+      overflow-y: auto;
+      color: var(--text-muted);
+    }
+
+    /* ==========================================================================
+       新增核心：AI Agent 对话组件 (Interactive AI Dialogue Box)
+       ========================================================================== */
+    .agent-chat-card {
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      box-shadow: 0 8px 30px rgba(56, 189, 248, 0.08);
+      position: relative;
+    }
+    
+    .agent-chat-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 14px;
+      margin-bottom: 16px;
+    }
+
+    .agent-messages-container {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      height: 320px;
+      overflow-y: auto;
+      padding-right: 8px;
+      margin-bottom: 16px;
+    }
+
+    .chat-bubble {
+      display: flex;
+      gap: 12px;
+      max-width: 85%;
+    }
+    .chat-bubble.user {
+      align-self: flex-end;
+      flex-direction: row-reverse;
+    }
+    .chat-bubble.agent {
+      align-self: flex-start;
+    }
+
+    .chat-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      flex-shrink: 0;
+      font-weight: bold;
+      font-size: 12px;
+    }
+    .chat-bubble.agent .chat-avatar {
+      background: var(--agent-soft);
+      color: var(--agent-accent);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+    }
+    .chat-bubble.user .chat-avatar {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+    }
+
+    .chat-content {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .chat-bubble.user .chat-content {
+      background: var(--surface-hover);
+      border-color: rgba(245, 158, 11, 0.2);
+    }
+
+    /* 快捷 Prompt Chip 标签 */
+    .prompt-chips {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 8px;
+      margin-bottom: 12px;
+    }
+    .chip-btn {
+      white-space: nowrap;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-pill);
+      padding: 4px 12px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .chip-btn:hover {
+      border-color: var(--agent-accent);
+      color: var(--agent-accent);
+      background: var(--agent-soft);
+    }
+
+    .chat-input-bar {
+      display: flex;
+      gap: 10px;
+    }
+    .chat-input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      color: var(--text);
+    }
+    .chat-input:focus { border-color: var(--agent-accent); }
+
+    /* Cookies 管理区 */
+    .cookie-box {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .cookie-textarea {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      resize: vertical;
+    }
+    .cookie-textarea:focus { border-color: var(--border-focus); }
+    .button-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+    }
+    .button-grid.two { grid-template-columns: repeat(2, 1fr); }
+    .mini-btn {
+      background: var(--surface-muted);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 6px 8px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .mini-btn:hover { background: var(--surface-hover); color: var(--text); }
+
+    /* 媒体播放器与下载 */
+    .media-panel {
+      margin-bottom: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .media-player {
+      width: 100%;
+      max-height: 320px;
+      border-radius: var(--radius-sm);
+      background: #000;
+    }
+    .media-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .download-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--surface-muted);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 6px 12px;
+      font-size: 12px;
+      color: var(--text);
+      text-decoration: none;
+    }
+    .download-link:hover { background: var(--surface-hover); }
+    .media-hint { font-size: 11px; color: var(--text-dim); }
+
+    /* 历史任务项操作 */
+    .history-mini-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 6px;
+    }
+    .history-delete {
+      background: transparent;
+      border: none;
+      color: var(--text-dim);
+      font-size: 11px;
+      padding: 0 4px;
+    }
+    .history-delete:hover { color: var(--danger); }
+    .history-empty { font-size: 12px; color: var(--text-dim); padding: 8px; }
+
+    /* 侧边栏区块 */
+    .sidebar-section { display: flex; flex-direction: column; gap: 8px; }
+    .info-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 12px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+    }
+    .info-card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .info-card-title { font-weight: 600; color: var(--text-muted); }
+    .info-card-note { color: var(--text-dim); font-size: 11px; }
+
+    .qr-image {
+      max-width: 180px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      align-self: center;
+    }
+    .hint-text { font-size: 11px; color: var(--text-dim); }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+      font-size: 12px;
+    }
+    .meta-label { color: var(--text-dim); }
+    .mono { font-family: var(--font-mono); }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .flex-between { display: flex; justify-content: space-between; align-items: center; }
+    .stack-gap { display: flex; flex-direction: column; gap: 10px; }
+    .full-width { width: 100%; }
+    .mt-14 { margin-top: 14px; }
+
+    /* ==========================================================================
+       移动端布局适配：单列沉浸式流 (Single Column Focus Stream)
+       ========================================================================== */
+    @media (max-width: 959px) {
+      .app-layout {
+        grid-template-columns: 1fr;
+      }
+
+      /* 隐藏 Notion 侧边栏，转换为移动端顶栏 + 折叠抽屉形态 */
+      .notion-sidebar {
+        position: relative;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 16px;
+      }
+
+      .main-canvas {
+        padding: 20px 16px;
+        gap: 20px;
+        max-width: 100%;
+      }
+
+      .workspace-grid {
+        grid-template-columns: 1fr; /* 单列模式 */
+      }
+
+      .tab-nav {
+        width: 100%;
+        justify-content: space-around;
+      }
+
+      .chat-bubble { max-width: 92%; }
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="app-layout">
+
+    <!-- ================= 1. LEFT SIDEBAR (PC Notion 极简风) ================= -->
+    <aside class="notion-sidebar">
+      <!-- 品牌信息 -->
+      <div class="brand-header">
+        <div class="brand-logo">V</div>
+        <div>
+          <div class="brand-title">VideoInsight <span class="badge badge-accent">v3.0</span></div>
+          <div class="brand-status"><span class="status-dot"></span> 服务就绪 (Focus Mode)</div>
+        </div>
+      </div>
+
+      <!-- Notion 侧边导航区 -->
+      <nav>
+        <div class="sidebar-section-title">工作台视图</div>
+        <a href="#workspace" class="sidebar-nav-item active">
+          <span>⚡</span> 快速分析
+        </a>
+        <a href="#agent" class="sidebar-nav-item">
+          <span>🤖</span> AI Agent 助手
+        </a>
+        <a href="#cookies" class="sidebar-nav-item">
+          <span>🔑</span> Cookies 授权
+        </a>
+      </nav>
+
+      <!-- Cookie 状态卡片 -->
+      <div class="info-card">
+        <div class="info-card-head">
+          <strong class="info-card-title">平台登录状态</strong>
+          <span id="sidebarCookieStatus" class="badge badge-success">已连接</span>
+        </div>
+        <p class="info-card-note">解析抖音/B站长视频需有效 Cookies</p>
+      </div>
+
+      <!-- 历史任务 (PC 侧边栏常驻) -->
+      <div class="sidebar-section" id="historySection">
+        <div class="sidebar-section-title flex-between">
+          <span>历史任务 (最近)</span>
+          <button id="refreshHistory" class="history-delete">刷新</button>
+        </div>
+        <div class="history-mini-list" id="historyList">
+          <div class="history-empty">加载中...</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ================= 2. MAIN CANVAS (PC 画布 & 移动端沉浸单列) ================= -->
+    <main class="main-canvas">
+
+      <!-- 核心分析工作台 Grid (移动端自动折叠为单列) -->
+      <section id="workspace" class="workspace-grid">
+        
+        <!-- 上传卡片 -->
+        <div class="card-panel">
+          <div class="card-header">
+            <div class="card-title"><span>📁</span> 本地视频/音频分析</div>
+            <span class="badge badge-accent">本地加速</span>
+          </div>
+
+          <form id="uploadForm">
+            <label class="drop-zone" for="mediaFile" id="dropZone">
+              <input id="mediaFile" name="file" type="file" accept="audio/*,video/*" style="display: none;" />
+              <div class="drop-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+              </div>
+              <strong id="fileName" style="font-size: 13px;">点击或拖入音视频文件</strong>
+              <small style="color: var(--text-dim); font-size: 11px;">支持 mp3 / mp4 / m4a / wav</small>
+            </label>
+
+            <div class="form-group mt-14">
+              <label class="form-label" for="uploadMode">分析模式</label>
+              <select id="uploadMode" class="form-select">
+                <option value="summary">AI 智能总结</option>
+                <option value="transcript">逐字稿提取</option>
+                <option value="interview">面试/观点提取</option>
+              </select>
+            </div>
+
+            <div class="flex-between" style="margin-bottom: 14px;">
+              <label class="switch-label">
+                <input type="checkbox" id="uploadReal" class="switch-input" checked />
+                <span class="switch-slider"></span>
+                <span>深度思考模式</span>
+              </label>
+            </div>
+
+            <button type="submit" class="btn full-width">开始分析文件</button>
+          </form>
+        </div>
+
+        <!-- 链接解析卡片 -->
+        <div class="card-panel">
+          <div class="card-header">
+            <div class="card-title"><span>🔗</span> 在线链接抓取</div>
+            <span class="badge badge-accent">多平台</span>
+          </div>
+
+          <form id="linkForm">
+            <div class="form-group">
+              <label class="form-label" for="videoUrl">视频/网络链接 (URL)</label>
+              <input id="videoUrl" type="url" class="form-input" placeholder="https://v.douyin.com/... 或 bilibili" />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="linkMode">解析模式</label>
+              <select id="linkMode" class="form-select">
+                <option value="summary">AI 智能总结</option>
+                <option value="transcript">逐字稿提取</option>
+                <option value="interview">面试/观点提取</option>
+              </select>
+            </div>
+
+            <div class="flex-between" style="margin-bottom: 14px;">
+              <label class="switch-label">
+                <input type="checkbox" id="linkReal" class="switch-input" checked />
+                <span class="switch-slider"></span>
+                <span>真实抓取</span>
+              </label>
+            </div>
+
+            <button type="submit" class="btn full-width">立即链接分析</button>
+          </form>
+        </div>
+
+      </section>
+
+      <!-- 任务进度与状态追踪卡片 -->
+      <section class="card-panel">
+        <div class="card-header">
+          <div class="card-title"><span>⚡</span> 任务实时状态</div>
+          <span id="taskStatusBadge" class="badge badge-accent">待命</span>
+        </div>
+
+        <div class="meta-grid">
+          <div><span class="meta-label">任务 ID:</span> <span id="taskId" class="mono">-</span></div>
+          <div><span class="meta-label">来源:</span> <span id="taskSource">-</span></div>
+        </div>
+
+        <div class="progress-bar-bg">
+          <div id="progressBar" class="progress-fill"></div>
+        </div>
+        <div class="flex-between hint-text">
+          <span id="taskMessage">等待提交任务...</span>
+          <span id="progressPercent">0%</span>
+        </div>
+      </section>
+
+      <!-- 媒体播放与分析结果 -->
+      <section class="card-panel">
+        <!-- 视频/音频播放器 (按需显示) -->
+        <div id="mediaPanel" class="media-panel" hidden>
+          <video id="mediaVideo" class="media-player" controls preload="metadata" hidden></video>
+          <audio id="mediaAudio" class="media-player" controls preload="metadata" hidden></audio>
+          <div class="media-actions">
+            <a id="mediaDownloadMain" class="download-link" href="#">下载</a>
+            <a id="mediaDownloadAudio" class="download-link" href="#" hidden>下载音频（转写用）</a>
+            <span id="mediaHint" class="media-hint" hidden></span>
+          </div>
+        </div>
+
+        <!-- 结果切换 Segmented Tabs -->
+        <div class="tab-nav">
+          <button class="tab-btn active" data-target="summaryOutput" type="button">AI 总结</button>
+          <button class="tab-btn" data-target="transcriptOutput" type="button">逐字稿</button>
+          <button class="tab-btn" data-target="rawOutput" type="button">JSON 原文</button>
+        </div>
+
+        <!-- 输出显示框 -->
+        <div id="summaryOutput" class="output-box tab-panel active">等待分析任务完成后显示结果...</div>
+        <div id="transcriptOutput" class="output-box tab-panel">暂无逐字稿</div>
+        <div id="rawOutput" class="output-box tab-panel">{}</div>
+      </section>
+
+      <!-- ================= 3. AI AGENT 交互对话框 (新增核心) ================= -->
+      <section id="agent" class="card-panel agent-chat-card">
+        <div class="agent-chat-header">
+          <div class="card-title">
+            <span>🤖</span> VideoInsight AI Agent 助手
+          </div>
+          <span class="badge badge-agent">智能对话中</span>
+        </div>
+
+        <!-- 对话消息列表 -->
+        <div id="chatMessages" class="agent-messages-container">
+          <!-- 默认 Agent 欢迎语 -->
+          <div class="chat-bubble agent">
+            <div class="chat-avatar">AI</div>
+            <div class="chat-content">
+              你好！我是你的视频分析 Agent。您可以针对已提取的视频内容向我提问，例如生成分段总结、提取关键观点或解答疑问。
+            </div>
+          </div>
+        </div>
+
+        <!-- 快捷 Prompt 快捷选择 -->
+        <div class="prompt-chips">
+          <button class="chip-btn" type="button" data-prompt="总结此视频的核心观点">💡 总结核心观点</button>
+          <button class="chip-btn" type="button" data-prompt="生成分阶段时间轴大纲">⏱️ 生成时间轴大纲</button>
+          <button class="chip-btn" type="button" data-prompt="整理成 3 道面试问答题">📝 整理成面试题</button>
+          <button class="chip-btn" type="button" data-prompt="视频中提到了哪些关键工具？">❓ 提到了哪些工具？</button>
+        </div>
+
+        <!-- 输入框 -->
+        <div class="chat-input-bar">
+          <input id="chatInput" type="text" class="chat-input" placeholder="输入关于视频的问题 (如：总结第三部分内容)..." />
+          <button id="sendChatBtn" class="btn btn-agent" type="button">发送</button>
+        </div>
+      </section>
+
+      <!-- ================= 4. COOKIES 授权区 ================= -->
+      <section id="cookies" class="card-panel">
+        <div class="card-header">
+          <div class="card-title"><span>🔑</span> Cookies 授权</div>
+          <span id="cookieState" class="badge badge-success">检查中...</span>
+        </div>
+
+        <div class="cookie-box">
+          <label class="form-label" for="cookieText">粘贴 Cookie 或 Cookie Editor JSON</label>
+          <textarea id="cookieText" class="cookie-textarea" rows="5"
+            placeholder="Cookie: sessionid=...; sid_guard=... 或 Cookie Editor 导出的 JSON"></textarea>
+
+          <div class="button-grid two">
+            <button id="saveCookieText" class="mini-btn" type="button">粘贴保存</button>
+            <button id="verifyCookies" class="mini-btn" type="button">检查 Cookies</button>
+          </div>
+
+          <label class="form-label" for="cookieFile">上传 cookies.txt / JSON</label>
+          <input id="cookieFile" class="cookie-textarea" type="file" accept=".txt,.json,text/plain,application/json" />
+
+          <div class="button-grid">
+            <button id="startQrLogin" class="mini-btn" type="button">打开扫码登录窗口</button>
+            <button id="openCookieBrowser" class="mini-btn" type="button">打开登录窗口</button>
+            <button id="checkCookieBrowser" class="mini-btn" type="button">检查窗口</button>
+          </div>
+          <div class="button-grid two">
+            <button id="captureCookieBrowser" class="mini-btn" type="button">抓取登录态</button>
+            <button id="uploadCookieFile" class="mini-btn" type="button">上传保存</button>
+          </div>
+
+          <img id="qrImage" class="qr-image" alt="抖音登录二维码" hidden />
+          <p id="cookieMessage" class="hint-text">链接解析失败时再配置。</p>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+
+</html>

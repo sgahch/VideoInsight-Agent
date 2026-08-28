@@ -1,173 +1,351 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>VideoInsight Agent</title>
-    <link rel="stylesheet" href="/static/styles.css" />
-  </head>
-  <body>
-    <main class="shell">
-      <header class="topbar">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>VideoInsight Agent - 沉浸式 AI 视频分析平台</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+
+<body>
+
+  <div class="app-layout">
+
+    <!-- ================= 1. LEFT SIDEBAR (PC Notion 极简风) ================= -->
+    <aside class="notion-sidebar">
+      <!-- 品牌信息 -->
+      <div class="brand-header">
+        <div class="brand-logo">V</div>
         <div>
-          <h1>VideoInsight Agent</h1>
-          <p id="serviceState">正在连接本地服务...</p>
+          <div class="brand-title">VideoInsight <span class="badge badge-accent">v3.0</span></div>
+          <div class="brand-status">
+            <span id="statusDot" class="status-dot"></span>
+            <span id="serviceState">正在连接本地服务...</span>
+          </div>
         </div>
-        <a class="docs-link" href="/docs">API 文档</a>
-      </header>
+      </div>
 
-      <section class="workspace" aria-label="视频分析工作台">
-        <form id="uploadForm" class="panel">
-          <div class="panel-head">
-            <h2>上传分析</h2>
-            <span>推荐</span>
+      <!-- Notion 侧边导航区 -->
+      <nav>
+        <div class="sidebar-section-title">工作台视图</div>
+        <a href="#workspace" class="sidebar-nav-item active">
+          <span>⚡</span> 快速分析
+        </a>
+        <a href="#agent" class="sidebar-nav-item">
+          <span>🤖</span> AI Agent 助手
+        </a>
+        <a href="#cookies" class="sidebar-nav-item">
+          <span>🔑</span> Cookies 授权
+        </a>
+        <a href="#settings" class="sidebar-nav-item">
+          <span>⚙️</span> 模型设置
+        </a>
+      </nav>
+
+      <!-- 主题切换 -->
+      <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px;">
+        <button id="themeToggle" class="btn btn-secondary" type="button" style="flex: 1; justify-content: center;" title="切换深色 / 浅色主题">
+          <span id="themeToggleIcon">🌙</span>
+          <span id="themeToggleText">深色模式</span>
+        </button>
+      </div>
+
+      <!-- Cookie 状态卡片 -->
+      <div class="info-card">
+        <div class="info-card-head">
+          <strong class="info-card-title">平台登录状态</strong>
+          <span id="sidebarCookieStatus" class="badge badge-muted">检查中...</span>
+        </div>
+        <p class="info-card-note">解析抖音/B站长视频需有效 Cookies</p>
+      </div>
+
+      <!-- 历史任务 (PC 侧边栏常驻) -->
+      <div class="history-sidebar-section">
+        <div class="sidebar-section-title flex-between">
+          <span>历史任务（最近）</span>
+          <button id="refreshHistory" type="button" class="history-refresh">刷新</button>
+        </div>
+        <div class="history-mini-list" id="historyList">
+          <div class="history-empty">加载中...</div>
+        </div>
+        <p id="historyMessage" class="hint-text"></p>
+      </div>
+    </aside>
+
+    <!-- ================= 2. MAIN CANVAS (PC 画布 & 移动端沉浸单列) ================= -->
+    <main class="main-canvas">
+
+      <!-- 核心分析工作台 Grid (移动端自动折叠为单列) -->
+      <section id="workspace" class="workspace-grid">
+
+        <!-- 上传卡片 -->
+        <div class="card-panel">
+          <div class="card-header">
+            <div class="card-title"><span>📁</span> 本地视频/音频分析</div>
+            <span class="badge badge-accent">本地加速</span>
           </div>
 
-          <label class="file-drop" for="mediaFile">
-            <input id="mediaFile" name="file" type="file" accept="audio/*,video/*" />
-            <strong id="fileName">选择音频或视频文件</strong>
-            <small>文件会保存到项目 media 目录</small>
-          </label>
-
-          <div class="field-row">
-            <label for="uploadMode">模式</label>
-            <select id="uploadMode" name="mode">
-              <option value="summary">总结</option>
-              <option value="transcript">文字稿</option>
-              <option value="interview">面经提取</option>
-            </select>
-          </div>
-
-          <label class="switch">
-            <input id="uploadReal" type="checkbox" checked />
-            <span>真实分析</span>
-          </label>
-
-          <button type="submit">开始上传分析</button>
-        </form>
-
-        <form id="linkForm" class="panel">
-          <div class="panel-head">
-            <h2>链接分析</h2>
-            <span>增强</span>
-          </div>
-
-          <label class="field-block" for="videoUrl">
-            <span>视频链接</span>
-            <input id="videoUrl" name="url" type="url" placeholder="https://..." />
-          </label>
-
-          <div class="field-row">
-            <label for="linkMode">模式</label>
-            <select id="linkMode" name="mode">
-              <option value="summary">总结</option>
-              <option value="transcript">文字稿</option>
-              <option value="interview">面经提取</option>
-            </select>
-          </div>
-
-          <label class="switch">
-            <input id="linkReal" type="checkbox" checked />
-            <span>真实分析</span>
-          </label>
-
-          <button type="submit">开始链接分析</button>
-        </form>
-      </section>
-
-      <section class="result-layout" aria-label="分析结果">
-        <aside class="status-panel">
-          <h2>任务</h2>
-          <dl>
-            <div>
-              <dt>状态</dt>
-              <dd id="taskStatus">未开始</dd>
-            </div>
-            <div>
-              <dt>任务 ID</dt>
-              <dd id="taskId">-</dd>
-            </div>
-            <div>
-              <dt>来源</dt>
-              <dd id="taskSource">-</dd>
-            </div>
-          </dl>
-          <div class="progress">
-            <div id="progressBar"></div>
-          </div>
-          <p id="taskMessage">上传文件或提交链接后，这里会显示处理状态。</p>
-
-          <form id="cookieForm" class="cookie-box">
-            <h3>平台 Cookies</h3>
-            <div class="cookie-status">
-              <span id="cookieState">正在检查...</span>
-            </div>
-            <label for="cookieText">粘贴 Cookie 或 Cookie Editor JSON</label>
-            <textarea id="cookieText" rows="5" placeholder="Cookie: sessionid=...; sid_guard=... 或 Cookie Editor 导出的 JSON"></textarea>
-            <div class="button-grid two">
-              <button id="saveCookieText" type="button">粘贴保存</button>
-              <button id="verifyCookies" type="button">检查 Cookies</button>
-            </div>
-            <label for="cookieFile">上传 cookies.txt / JSON</label>
-            <input id="cookieFile" type="file" accept=".txt,.json,text/plain,application/json" />
-            <button type="submit">上传保存</button>
-            <div class="qr-box">
-              <div class="qr-head">
-                <h4>扫码登录</h4>
-                <span>推荐</span>
+          <form id="uploadForm">
+            <label class="drop-zone" for="mediaFile" id="dropZone">
+              <input id="mediaFile" name="file" type="file" accept="audio/*,video/*" style="display: none;" />
+              <div class="drop-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
               </div>
-              <button id="startQrLogin" type="button">打开扫码登录窗口</button>
-              <img id="qrImage" alt="抖音登录二维码" hidden />
-              <p id="qrMessage">窗口打开后用抖音 App 扫码登录，本页会自动尝试保存登录态。</p>
+              <strong id="fileName" class="drop-title">点击或拖入音视频文件</strong>
+              <small class="drop-sub">支持 mp3 / mp4 / m4a / wav</small>
+            </label>
+
+            <div class="form-group mt-14">
+              <label class="form-label" for="uploadMode">分析模式</label>
+              <select id="uploadMode" class="form-select">
+                <option value="summary">AI 智能总结</option>
+                <option value="transcript">逐字稿提取</option>
+                <option value="interview">面试/观点提取</option>
+              </select>
             </div>
-            <div class="button-grid">
-              <button id="openCookieBrowser" type="button">打开登录窗口</button>
-              <button id="checkCookieBrowser" type="button">检查窗口</button>
-              <button id="captureCookieBrowser" type="button">抓取登录态</button>
+
+            <div class="flex-between" style="margin-bottom: 14px;">
+              <label class="switch-label">
+                <input type="checkbox" id="uploadReal" class="switch-input" checked />
+                <span class="switch-slider"></span>
+                <span>深度思考模式（真实分析）</span>
+              </label>
             </div>
-            <p id="cookieMessage">链接解析失败时再配置。</p>
+
+            <button id="uploadSubmit" type="submit" class="btn full-width">开始分析文件</button>
           </form>
-        </aside>
+        </div>
 
-        <div class="output-panel">
-          <div id="mediaPanel" class="media-panel" hidden>
-            <video id="mediaVideo" class="media-player" controls preload="metadata" hidden></video>
-            <audio id="mediaAudio" class="media-player" controls preload="metadata" hidden></audio>
-            <div class="media-actions">
-              <a id="mediaDownloadMain" class="download-link" href="#">下载</a>
-              <a id="mediaDownloadAudio" class="download-link ghost-download" href="#" hidden>下载音频（转写用）</a>
-              <span id="mediaHint" class="media-hint" hidden></span>
+        <!-- 链接解析卡片 -->
+        <div class="card-panel">
+          <div class="card-header">
+            <div class="card-title"><span>🔗</span> 在线链接抓取</div>
+            <span class="badge badge-accent">多平台</span>
+          </div>
+
+          <form id="linkForm">
+            <div class="form-group">
+              <label class="form-label" for="videoUrl">视频/网络链接 (URL)</label>
+              <input id="videoUrl" type="url" class="form-input" placeholder="https://v.douyin.com/... 或 bilibili" />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="linkMode">解析模式</label>
+              <select id="linkMode" class="form-select">
+                <option value="summary">AI 智能总结</option>
+                <option value="transcript">逐字稿提取</option>
+                <option value="interview">面试/观点提取</option>
+              </select>
+            </div>
+
+            <div class="flex-between" style="margin-bottom: 14px;">
+              <label class="switch-label">
+                <input type="checkbox" id="linkReal" class="switch-input" checked />
+                <span class="switch-slider"></span>
+                <span>真实抓取</span>
+              </label>
+            </div>
+
+            <button id="linkSubmit" type="submit" class="btn full-width">立即链接分析</button>
+          </form>
+        </div>
+
+      </section>
+
+      <!-- 任务进度与状态追踪卡片 -->
+      <section class="card-panel">
+        <div class="card-header">
+          <div class="card-title"><span>⚡</span> 任务实时状态</div>
+          <span id="taskStatusBadge" class="badge badge-accent">待命</span>
+        </div>
+
+        <div class="meta-grid">
+          <div><span class="meta-label">任务 ID:</span> <span id="taskId" class="mono meta-value">-</span></div>
+          <div><span class="meta-label">来源:</span> <span id="taskSource" class="meta-value">-</span></div>
+        </div>
+
+        <div class="progress-bar-bg">
+          <div id="progressBar" class="progress-fill"></div>
+        </div>
+        <div class="flex-between hint-text">
+          <span id="taskMessage" class="task-message">等待提交任务...</span>
+          <span id="progressPercent">0%</span>
+        </div>
+      </section>
+
+      <!-- 媒体播放与分析结果 -->
+      <section class="card-panel">
+        <!-- 视频/音频播放器 (按需显示) -->
+        <div id="mediaPanel" class="media-panel" hidden>
+          <video id="mediaVideo" class="media-player" controls preload="metadata" hidden></video>
+          <audio id="mediaAudio" class="media-player" controls preload="metadata" hidden></audio>
+          <div class="media-actions">
+            <a id="mediaDownloadMain" class="download-link" href="#">下载</a>
+            <a id="mediaDownloadAudio" class="download-link" href="#" hidden>下载音频（转写用）</a>
+            <span id="mediaHint" class="media-hint" hidden></span>
+          </div>
+        </div>
+
+        <!-- 结果切换 Segmented Tabs -->
+        <div class="tab-nav" role="tablist" aria-label="结果视图">
+          <button class="tab-btn active" data-target="summaryOutput" type="button" role="tab">AI 总结</button>
+          <button class="tab-btn" data-target="transcriptOutput" type="button" role="tab">逐字稿</button>
+          <button class="tab-btn" data-target="rawOutput" type="button" role="tab">JSON 原文</button>
+        </div>
+
+        <!-- 输出显示框 -->
+        <div id="summaryOutput" class="output-box is-prose" role="tabpanel">等待分析任务完成后显示结果...</div>
+        <div id="transcriptOutput" class="output-box" style="display: none;" role="tabpanel">暂无逐字稿</div>
+        <div id="rawOutput" class="output-box" style="display: none;" role="tabpanel">{}</div>
+      </section>
+
+      <!-- ================= 3. AI AGENT 交互对话框 (新增核心) ================= -->
+      <section id="agent" class="card-panel agent-chat-card">
+        <div class="agent-chat-header">
+          <div class="card-title">
+            <span>🤖</span> VideoInsight AI Agent 助手
+          </div>
+          <span id="agentContext" class="badge badge-muted">未选择任务</span>
+        </div>
+
+        <!-- 对话消息列表 -->
+        <div id="chatMessages" class="agent-messages-container" aria-live="polite">
+          <!-- 默认 Agent 欢迎语 -->
+          <div class="chat-bubble agent">
+            <div class="chat-avatar">AI</div>
+            <div class="chat-content">
+              你好！我是你的视频分析 Agent 🤖<br />
+              完成一次分析后（上传文件或提交链接），你就可以针对该视频的转写稿向我提问：分段总结、提取关键观点、整理面试问答都可以。<br />
+              <strong>开始对话前，请先到左侧「⚙️ 模型设置」配置你自己的模型 API Key</strong>——这是对话正常工作的前提。
             </div>
           </div>
+        </div>
 
-          <div class="tabs" role="tablist" aria-label="结果视图">
-            <button class="tab active" data-target="summaryView" type="button">结果</button>
-            <button class="tab" data-target="transcriptView" type="button">文字稿</button>
-            <button class="tab" data-target="rawView" type="button">JSON</button>
+        <!-- 快捷 Prompt 快捷选择 -->
+        <div class="prompt-chips" id="promptChips">
+          <button class="chip-btn" type="button" onclick="sendPrompt('总结此视频的核心观点')">💡 总结核心观点</button>
+          <button class="chip-btn" type="button" onclick="sendPrompt('生成分阶段时间轴大纲')">⏱️ 生成时间轴大纲</button>
+          <button class="chip-btn" type="button" onclick="sendPrompt('整理成 3 道面试问答题')">📝 整理成面试题</button>
+          <button class="chip-btn" type="button" onclick="sendPrompt('视频中提到了哪些关键工具？')">❓ 提到了哪些工具？</button>
+        </div>
+
+        <!-- 输入框 -->
+        <div class="chat-input-bar">
+          <input id="chatInput" type="text" class="chat-input" placeholder="输入关于视频的问题 (如：总结第三部分内容)..." />
+          <button id="sendChatBtn" class="btn btn-agent" type="button">发送</button>
+        </div>
+      </section>
+
+      <!-- ================= 4. COOKIES 授权 (对应侧边栏 #cookies 锚点) ================= -->
+      <section id="cookies" class="card-panel">
+        <div class="card-header">
+          <div class="card-title"><span>🔑</span> Cookies 授权</div>
+          <span id="cookieState" class="badge badge-muted">检查中...</span>
+        </div>
+
+        <div class="cookie-box">
+          <p class="settings-note" style="margin-bottom: 12px;">
+            大多数视频链接无需 Cookies 即可匿名下载。仅当抖音等平台要求登录时再配置——
+            <strong>推荐直接上传 cookies.txt</strong>（用浏览器扩展导出），最简单快捷。
+          </p>
+
+          <label class="form-label" for="cookieFile">方式一：上传 cookies.txt / JSON</label>
+          <div class="button-grid two" style="margin-bottom: 14px;">
+            <input id="cookieFile" class="cookie-textarea" type="file" accept=".txt,.json,text/plain,application/json" style="grid-column: 1 / -1;" />
+            <button id="uploadCookieFile" class="mini-btn" type="button">上传保存</button>
+            <button id="verifyCookies" class="mini-btn" type="button">检查 Cookies</button>
           </div>
 
-          <article id="summaryView" class="view active">
-            <pre id="summaryOutput">暂无结果</pre>
-          </article>
-          <article id="transcriptView" class="view">
-            <pre id="transcriptOutput">暂无文字稿</pre>
-          </article>
-          <article id="rawView" class="view">
-            <pre id="rawOutput">{}</pre>
-          </article>
+          <details class="cookie-advanced">
+            <summary>方式二：粘贴 Cookie 文本 / 扫码登录（进阶）</summary>
+
+            <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;">
+              <label class="form-label" for="cookieText">粘贴 Cookie 或 Cookie Editor JSON</label>
+              <textarea id="cookieText" class="cookie-textarea" rows="4"
+                placeholder="Cookie: sessionid=...; sid_guard=... 或 Cookie Editor 导出的 JSON"></textarea>
+              <div class="button-grid two">
+                <button id="saveCookieText" class="mini-btn" type="button">粘贴保存</button>
+                <button id="startQrLogin" class="mini-btn" type="button">扫码登录</button>
+              </div>
+              <div class="button-grid two">
+                <button id="openCookieBrowser" class="mini-btn" type="button">打开登录窗口</button>
+                <button id="captureCookieBrowser" class="mini-btn" type="button">抓取登录态</button>
+              </div>
+              <button id="checkCookieBrowser" class="mini-btn" type="button">检查专用窗口状态</button>
+            </div>
+          </details>
+
+          <img id="qrImage" class="qr-image" alt="抖音登录二维码" hidden />
+          <p id="qrMessage" class="cookie-message" hidden></p>
+          <p id="cookieMessage" class="cookie-message">链接解析失败时再配置。</p>
         </div>
       </section>
 
-      <section class="history-panel panel" aria-label="历史任务">
-        <div class="panel-head">
-          <h2>历史任务</h2>
-          <button id="refreshHistory" type="button" class="ghost-btn">刷新</button>
+      <!-- ================= 5. 模型设置 (用户自备 LLM / API Key) ================= -->
+      <section id="settings" class="card-panel">
+        <div class="card-header">
+          <div class="card-title"><span>⚙️</span> 模型设置</div>
+          <span id="modelState" class="badge badge-muted">未配置</span>
         </div>
-        <p id="historyMessage" class="history-message">加载中...</p>
-        <ul id="historyList" class="history-list"></ul>
+
+        <p class="settings-note">
+          配置你自己的大模型后，<strong>AI Agent 对话</strong>将使用你提供的模型与 API Key。
+        </p>
+
+        <div class="privacy-tip">
+          <div class="privacy-tip-icon">🔒</div>
+          <div class="privacy-tip-body">
+            <strong>你的 Key 是安全的</strong>
+            <ul>
+              <li>Key 仅保存在<strong>你自己的浏览器</strong>（localStorage），关闭页面后仍保留，随时可清除。</li>
+              <li>使用时仅作为一次性请求参数发送给本项目服务，用于调用<strong>你指定的模型接口</strong>，服务端<strong>不会存储、不会记录、不会上传到任何第三方</strong>。</li>
+              <li>你可以随时在「模型设置」里清除 Key，恢复使用服务端默认模型。</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="cookie-box">
+          <div class="form-group">
+            <label class="form-label" for="llmProvider">模型服务商</label>
+            <select id="llmProvider" class="form-select">
+              <option value="deepseek">DeepSeek</option>
+              <option value="openai">OpenAI</option>
+              <option value="custom">自定义（OpenAI 兼容）</option>
+            </select>
+          </div>
+
+          <div class="form-group" id="baseUrlGroup">
+            <label class="form-label" for="llmBaseUrl">API Base URL</label>
+            <input id="llmBaseUrl" type="url" class="form-input" placeholder="https://api.deepseek.com/v1" />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="llmModel">模型名称</label>
+            <input id="llmModel" type="text" class="form-input" placeholder="deepseek-chat" />
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="llmApiKey">API Key</label>
+            <input id="llmApiKey" type="password" class="form-input" placeholder="sk-..." autocomplete="off" />
+          </div>
+
+          <div class="flex-between">
+            <span id="modelMessage" class="cookie-message"></span>
+            <div style="display: flex; gap: 10px;">
+              <button id="clearModelConfig" class="btn btn-secondary" type="button">清除</button>
+              <button id="saveModelConfig" class="btn" type="button">保存配置</button>
+            </div>
+          </div>
+        </div>
       </section>
+
     </main>
+  </div>
 
-    <script src="/static/app.js"></script>
-  </body>
+  <script src="/static/app.js"></script>
+</body>
+
 </html>
