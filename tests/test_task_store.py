@@ -6,8 +6,8 @@ from app.schemas import AnalysisMode, AnalysisResult, AnalyzeRequest, MediaInfo,
 from app.task_store import SQLiteTaskStore
 
 
-def _request(url: str = "https://example.com/video") -> AnalyzeRequest:
-    return AnalyzeRequest(url=url, mode=AnalysisMode.summary, use_mock=True)
+def _request(url: str = "https://example.com/video", client_id: str | None = None) -> AnalyzeRequest:
+    return AnalyzeRequest(url=url, mode=AnalysisMode.summary, use_mock=True, client_id=client_id)
 
 
 def test_create_and_get(tmp_path: Path) -> None:
@@ -24,12 +24,22 @@ def test_create_and_get(tmp_path: Path) -> None:
 
 def test_list_order_and_status_filter(tmp_path: Path) -> None:
     store = SQLiteTaskStore(tmp_path / "tasks.db")
-    first = store.create(_request("https://example.com/a"))
-    second = store.create(_request("https://example.com/b"))
+    first = store.create(_request("https://example.com/a", client_id="c1"))
+    second = store.create(_request("https://example.com/b", client_id="c1"))
 
-    assert [t.task_id for t in store.list_tasks()] == [second.task_id, first.task_id]
-    assert [t.task_id for t in store.list_tasks(limit=1)] == [second.task_id]
-    assert store.list_tasks(status=TaskStatus.failed) == []
+    assert [t.task_id for t in store.list_tasks(client_id="c1")] == [second.task_id, first.task_id]
+    assert [t.task_id for t in store.list_tasks(limit=1, client_id="c1")] == [second.task_id]
+    assert store.list_tasks(status=TaskStatus.failed, client_id="c1") == []
+
+
+def test_list_tasks_requires_client_id(tmp_path: Path) -> None:
+    """任务按 client_id 隔离：未带身份返回空，他人身份看不到。"""
+    store = SQLiteTaskStore(tmp_path / "tasks.db")
+    task = store.create(_request("https://example.com/a", client_id="c1"))
+
+    assert store.list_tasks() == []
+    assert store.list_tasks(client_id="c2") == []
+    assert [t.task_id for t in store.list_tasks(client_id="c1")] == [task.task_id]
 
 
 def test_succeeded_roundtrip(tmp_path: Path) -> None:

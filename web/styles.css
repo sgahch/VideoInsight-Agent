@@ -72,6 +72,10 @@ html[data-theme="light"] {
   padding: 0;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   background-color: var(--bg);
   color: var(--text);
@@ -154,6 +158,65 @@ a {
   background: var(--surface-muted);
   color: var(--text-muted);
   border: 1px solid var(--border);
+}
+
+/* 链接解析预览 */
+.link-preview {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 10px);
+  background: var(--surface-muted);
+}
+.link-preview.hidden {
+  display: none;
+}
+.platform-badge {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #fff;
+  background: var(--accent);
+}
+.platform-badge.platform-抖音 { background: #fe2c55; }
+.platform-badge.platform-快手 { background: #ff4906; }
+.platform-badge.platform-b站 { background: #00a1d6; }
+.platform-badge.platform-小红书 { background: #ff2741; }
+.link-preview-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.link-preview-url {
+  font-size: 13px;
+  color: var(--text-strong, #111);
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.link-label {
+  margin: 0;
+  font-size: 13px;
+  padding: 6px 8px;
+}
+.link-preview-note {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.form-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
 }
 
 /* 工具类 */
@@ -702,6 +765,58 @@ a {
   max-height: 400px;
   overflow-y: auto;
   color: var(--text-muted);
+}
+
+/* 观众评论面板 */
+.comments-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.comments-summary {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.comment-list,
+.comment-sublist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.comment-sublist {
+  margin: 6px 0 0 18px;
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+}
+.comment-item {
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.comment-item:last-child {
+  border-bottom: none;
+}
+.comment-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.comment-author {
+  font-weight: 600;
+  color: var(--accent);
+  font-size: 13px;
+}
+.comment-like {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.comment-body {
+  font-size: 14px;
+  color: var(--text);
+  line-height: 1.5;
+  word-break: break-word;
 }
 
 /* Markdown 渲染后的正文排版（AI 总结 / Agent 回答） */

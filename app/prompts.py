@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.schemas import AnalysisMode
+from app.schemas import AnalysisMode, CommentItem
 
 # ---------- 元信息注入 ----------
 
@@ -22,6 +22,17 @@ METADATA_TEMPLATE = """# 视频元信息
 - 作者：{author}
 - 平台：{platform}
 - 时长：{duration}
+"""
+
+
+# ---------- 观众评论上下文（可选输入块，不计入输出格式契约） ----------
+
+COMMENTS_TEMPLATE = """# 观众评论（可选上下文，仅用于丰富分析视角）
+以下是该视频的部分观众评论。**仅作为补充视角，不得脱离【转写文本】与【观众评论】本身编造**：
+- 可结合评论中的高频观点、情绪倾向、争议点或追问，补充到「关键要点」与「行动建议」。
+- 评论可能含噪声、跑题或营销内容，请自行甄别；无法确定是针对视频本身的，忽略即可。
+- 不要新增输出板块，严格遵守上方格式契约。
+{comments}
 """
 
 
@@ -53,6 +64,7 @@ SUMMARY_PROMPT = """# 任务说明
 ## 4. 行动建议
 给出观众可落地的具体行动，每项以 `-` 开头、不超过 30 字；没有可行建议则写「无」
 
+{comments_block}
 # 转写文本
 {transcript}
 """
@@ -89,6 +101,7 @@ INTERVIEW_PROMPT = """# 任务说明
 ## 复盘建议
 给出 3-5 条求职者可参考的复盘建议，每项以 `-` 开头、不超过 40 字
 
+{comments_block}
 # 转写文本
 {transcript}
 """
@@ -156,11 +169,24 @@ def build_chat_prompt(
     )
 
 
+def render_comments_block(comments: list[CommentItem]) -> str:
+    """把归一化评论渲染成提示词里的观众评论上下文块（Markdown 列表）。"""
+    lines: list[str] = []
+    for comment in comments:
+        prefix = f"@{comment.author_nickname} " if comment.author_nickname else ""
+        lines.append(f"- {prefix}（赞 {comment.like_count}）{comment.content}")
+        for sub in comment.sub_comments:
+            sub_prefix = f"@{sub.author_nickname} " if sub.author_nickname else ""
+            lines.append(f"    - ↳ {sub_prefix}（赞 {sub.like_count}）{sub.content}")
+    return "\n".join(lines)
+
+
 def build_prompt(
     mode: AnalysisMode,
     transcript: str,
     metadata: dict[str, Any] | None = None,
     include_timestamps: bool = False,
+    comments_text: str | None = None,
 ) -> str:
     """根据模式构建提示词。
 
@@ -169,6 +195,7 @@ def build_prompt(
         transcript: 转写文本（include_timestamps=True 时应传入带时间戳的版本）
         metadata: 包含 video_title / author / platform / duration 的字典（可缺省）
         include_timestamps: 转写文本是否带时间戳（决定大纲是否允许标注时间范围）
+        comments_text: 观众评论上下文块（由 render_comments_block 生成），有则注入
     """
     metadata_block = render_metadata(metadata)
 
@@ -181,9 +208,11 @@ def build_prompt(
     if mode == AnalysisMode.transcript:
         return TRANSCRIPT_PROMPT.format(transcript=transcript)
 
+    comments_block = COMMENTS_TEMPLATE.format(comments=comments_text) if comments_text else ""
     template = INTERVIEW_PROMPT if mode == AnalysisMode.interview else SUMMARY_PROMPT
     return template.format(
         metadata=metadata_block,
         timestamp_note=timestamp_note,
+        comments_block=comments_block,
         transcript=transcript,
     )

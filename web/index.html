@@ -5,7 +5,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>VideoInsight Agent - 沉浸式 AI 视频分析平台</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260905-1" />
 </head>
 
 <body>
@@ -45,7 +45,8 @@
 
       <!-- 主题切换 -->
       <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px;">
-        <button id="themeToggle" class="btn btn-secondary" type="button" style="flex: 1; justify-content: center;" title="切换深色 / 浅色主题">
+        <button id="themeToggle" class="btn btn-secondary" type="button" style="flex: 1; justify-content: center;"
+          title="切换深色 / 浅色主题">
           <span id="themeToggleIcon">🌙</span>
           <span id="themeToggleText">深色模式</span>
         </button>
@@ -90,8 +91,11 @@
             <label class="drop-zone" for="mediaFile" id="dropZone">
               <input id="mediaFile" name="file" type="file" accept="audio/*,video/*" style="display: none;" />
               <div class="drop-icon">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
                 </svg>
               </div>
               <strong id="fileName" class="drop-title">点击或拖入音视频文件</strong>
@@ -107,7 +111,7 @@
               </select>
             </div>
 
-            <div class="flex-between" style="margin-bottom: 14px;">
+            <div id="uploadRealRow" class="flex-between" style="margin-bottom: 14px;">
               <label class="switch-label">
                 <input type="checkbox" id="uploadReal" class="switch-input" checked />
                 <span class="switch-slider"></span>
@@ -128,8 +132,17 @@
 
           <form id="linkForm">
             <div class="form-group">
-              <label class="form-label" for="videoUrl">视频/网络链接 (URL)</label>
-              <input id="videoUrl" type="url" class="form-input" placeholder="https://v.douyin.com/... 或 bilibili" />
+              <label class="form-label" for="videoUrl">视频/网络链接（支持直接粘贴分享文案）</label>
+              <input id="videoUrl" type="text" class="form-input" placeholder="粘贴抖音/B站/快手/小红书分享文案，或干净链接均可" />
+              <p class="form-hint">支持形如「复制打开抖音，看看【作者】《标题》… https://…」的分享文案，系统会自动提取链接与标题。</p>
+              <div id="linkPreview" class="link-preview hidden">
+                <span id="linkPreviewBadge" class="platform-badge"></span>
+                <div class="link-preview-body">
+                  <div id="linkPreviewUrl" class="link-preview-url"></div>
+                  <input id="linkLabel" class="form-input link-label" placeholder="自定义标签（可编辑，留空则用自动提取的标题）" />
+                  <div id="linkPreviewNote" class="link-preview-note"></div>
+                </div>
+              </div>
             </div>
 
             <div class="form-group">
@@ -141,7 +154,7 @@
               </select>
             </div>
 
-            <div class="flex-between" style="margin-bottom: 14px;">
+            <div id="linkRealRow" class="flex-between" style="margin-bottom: 14px;">
               <label class="switch-label">
                 <input type="checkbox" id="linkReal" class="switch-input" checked />
                 <span class="switch-slider"></span>
@@ -193,12 +206,14 @@
         <div class="tab-nav" role="tablist" aria-label="结果视图">
           <button class="tab-btn active" data-target="summaryOutput" type="button" role="tab">AI 总结</button>
           <button class="tab-btn" data-target="transcriptOutput" type="button" role="tab">逐字稿</button>
+          <button class="tab-btn" data-target="commentsOutput" type="button" role="tab">观众评论</button>
           <button class="tab-btn" data-target="rawOutput" type="button" role="tab">JSON 原文</button>
         </div>
 
         <!-- 输出显示框 -->
         <div id="summaryOutput" class="output-box is-prose" role="tabpanel">等待分析任务完成后显示结果...</div>
         <div id="transcriptOutput" class="output-box" style="display: none;" role="tabpanel">暂无逐字稿</div>
+        <div id="commentsOutput" class="output-box" style="display: none;" role="tabpanel">暂无观众评论</div>
         <div id="rawOutput" class="output-box" style="display: none;" role="tabpanel">{}</div>
       </section>
 
@@ -248,33 +263,34 @@
 
         <div class="cookie-box">
           <p class="settings-note" style="margin-bottom: 12px;">
-            大多数视频链接无需 Cookies 即可匿名下载。仅当抖音等平台要求登录时再配置——
-            <strong>推荐直接上传 cookies.txt</strong>（用浏览器扩展导出），最简单快捷。
+            大多数链接无需登录。遇到抖音登录态失效时，点击下方按钮扫码；
+            <strong>登录成功后会自动保存 Cookies 并重试刚才的链接任务。</strong>
           </p>
 
-          <label class="form-label" for="cookieFile">方式一：上传 cookies.txt / JSON</label>
-          <div class="button-grid two" style="margin-bottom: 14px;">
-            <input id="cookieFile" class="cookie-textarea" type="file" accept=".txt,.json,text/plain,application/json" style="grid-column: 1 / -1;" />
-            <button id="uploadCookieFile" class="mini-btn" type="button">上传保存</button>
-            <button id="verifyCookies" class="mini-btn" type="button">检查 Cookies</button>
-          </div>
+          <button id="startQrLogin" class="btn full-width" type="button">登录/刷新抖音 Cookies</button>
 
           <details class="cookie-advanced">
-            <summary>方式二：粘贴 Cookie 文本 / 扫码登录（进阶）</summary>
+            <summary>手动导入与故障排查（高级）</summary>
 
             <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;">
+              <label class="form-label" for="cookieFile">上传 cookies.txt / JSON</label>
+              <input id="cookieFile" class="cookie-textarea" type="file"
+                accept=".txt,.json,text/plain,application/json" />
+              <div class="button-grid two">
+                <button id="uploadCookieFile" class="mini-btn" type="button">上传保存</button>
+                <button id="verifyCookies" class="mini-btn" type="button">检查 Cookies</button>
+              </div>
               <label class="form-label" for="cookieText">粘贴 Cookie 或 Cookie Editor JSON</label>
               <textarea id="cookieText" class="cookie-textarea" rows="4"
                 placeholder="Cookie: sessionid=...; sid_guard=... 或 Cookie Editor 导出的 JSON"></textarea>
               <div class="button-grid two">
                 <button id="saveCookieText" class="mini-btn" type="button">粘贴保存</button>
-                <button id="startQrLogin" class="mini-btn" type="button">扫码登录</button>
+                <button id="checkCookieBrowser" class="mini-btn" type="button">检查登录窗口</button>
               </div>
               <div class="button-grid two">
                 <button id="openCookieBrowser" class="mini-btn" type="button">打开登录窗口</button>
                 <button id="captureCookieBrowser" class="mini-btn" type="button">抓取登录态</button>
               </div>
-              <button id="checkCookieBrowser" class="mini-btn" type="button">检查专用窗口状态</button>
             </div>
           </details>
 
@@ -292,7 +308,7 @@
         </div>
 
         <p class="settings-note">
-          配置你自己的大模型后，<strong>AI Agent 对话</strong>将使用你提供的模型与 API Key。
+          仅 <strong>AI 智能总结、面试/观点提取和 AI 对话</strong>需要配置模型；逐字稿提取无需 API Key。
         </p>
 
         <div class="privacy-tip">
@@ -302,7 +318,7 @@
             <ul>
               <li>Key 仅保存在<strong>你自己的浏览器</strong>（localStorage），关闭页面后仍保留，随时可清除。</li>
               <li>使用时仅作为一次性请求参数发送给本项目服务，用于调用<strong>你指定的模型接口</strong>，服务端<strong>不会存储、不会记录、不会上传到任何第三方</strong>。</li>
-              <li>你可以随时在「模型设置」里清除 Key，恢复使用服务端默认模型。</li>
+              <li>你可以随时清除 Key；清除后逐字稿提取仍可正常使用。</li>
             </ul>
           </div>
         </div>
@@ -345,7 +361,7 @@
     </main>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260905-1"></script>
 </body>
 
 </html>

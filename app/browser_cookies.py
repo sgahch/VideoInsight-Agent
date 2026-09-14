@@ -9,11 +9,12 @@ from urllib.error import HTTPError, URLError
 from itertools import count
 from pathlib import Path
 from shutil import which
-from time import sleep, time
+from time import sleep
 from urllib.request import urlopen
 
-from app.adapters.downloader import default_cookies_file
+from app.adapters.downloader import cookie_storage_path
 from app.config import Settings, settings
+from app.cookies import cookie_objects_to_netscape
 
 
 BASE_DEBUG_PORT = int(os.getenv("COOKIE_CAPTURE_DEBUG_PORT", "9222"))
@@ -36,10 +37,16 @@ class BrowserCookieError(Exception):
     pass
 
 
-def start_cookie_browser(runtime_settings: Settings = settings) -> dict[str, object]:
+def start_cookie_browser(
+    runtime_settings: Settings = settings,
+    *,
+    reset_session: bool = False,
+) -> dict[str, object]:
     existing_port = _active_debug_port(runtime_settings)
     if existing_port is not None:
         tab_state = _ensure_douyin_tab(existing_port)
+        if reset_session:
+            _clear_douyin_browser_cookies(existing_port)
         if tab_state.get("opened"):
             message = "已在专用浏览器中打开抖音登录页，请用抖音 App 扫码登录。"
         else:
@@ -77,6 +84,7 @@ def start_cookie_browser(runtime_settings: Settings = settings) -> dict[str, obj
     (metadata_dir / "browser.pid").write_text(str(process.pid), encoding="utf-8")
     (metadata_dir / "debug_port.txt").write_text(str(debug_port), encoding="utf-8")
     (metadata_dir / "current_profile.txt").write_text(str(profile_dir), encoding="utf-8")
+    _wait_for_devtools(debug_port)
     return {
         "started": True,
         "running": True,
@@ -139,7 +147,7 @@ def capture_douyin_cookies(runtime_settings: Settings = settings) -> dict[str, o
     has_login_cookie = bool(names & {"sessionid", "sid_guard", "sid_tt"})
     LOGGER.info("Captured %s douyin cookies. Login cookie present=%s", len(douyin_cookies), has_login_cookie)
 
-    target = default_cookies_file(runtime_settings)
+    target = cookie_storage_path(runtime_settings)
     if has_login_cookie:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_cookies_to_netscape(douyin_cookies), encoding="utf-8")
@@ -185,8 +193,17 @@ def _profile_dir(runtime_settings: Settings = settings) -> Path:
 def _new_profile_dir(runtime_settings: Settings = settings) -> Path:
     profiles_root = runtime_settings.media_dir / "_browser_profiles"
     profiles_root.mkdir(parents=True, exist_ok=True)
-    profile_dir = profiles_root / f"session-{int(time())}"
-    profile_dir.mkdir(parents=True, exist_ok=False)
+    saved_profile_file = _profile_dir(runtime_settings) / "current_profile.txt"
+    if saved_profile_file.exists():
+        try:
+            saved_profile = Path(saved_profile_file.read_text(encoding="utf-8").strip())
+        except OSError:
+            saved_profile = None
+        if saved_profile and saved_profile.is_dir():
+            return saved_profile
+
+    profile_dir = profiles_root / "douyin"
+    profile_dir.mkdir(parents=True, exist_ok=True)
     return profile_dir
 
 
@@ -200,20 +217,11 @@ def _saved_debug_port(runtime_settings: Settings = settings) -> int | None:
         return None
 
 
-def _candidate_ports(runtime_settings: Settings = settings) -> list[int]:
-    ports: list[int] = []
-    saved = _saved_debug_port(runtime_settings)
-    if saved:
-        ports.append(saved)
-    ports.extend(range(BASE_DEBUG_PORT, MAX_DEBUG_PORT + 1))
-    return list(dict.fromkeys(ports))
-
-
 def _active_debug_port(runtime_settings: Settings = settings) -> int | None:
-    for port in _candidate_ports(runtime_settings):
-        if _is_devtools_port(port):
-            return port
-    return None
+    saved_port = _saved_debug_port(runtime_settings)
+    if saved_port is None or not _is_devtools_port(saved_port):
+        return None
+    return saved_port
 
 
 def _is_devtools_port(port: int) -> bool:
@@ -346,6 +354,27 @@ def _read_cookies_from_tab(ws_url: str) -> list[dict]:
     return result.get("cookies", [])
 
 
+def _clear_douyin_browser_cookies(debug_port: int) -> None:
+    try:
+        import websocket
+    except ImportError as exc:
+        raise BrowserCookieError("缺少 websocket-client 依赖，请运行 pip install -r requirements.txt。") from exc
+
+    tab = _pick_douyin_tab(_get_tabs(debug_port))
+    if tab is None:
+        raise BrowserCookieError("没有找到可重置的抖音登录页面，请重新打开登录窗口。")
+
+    ws = websocket.create_connection(tab["webSocketDebuggerUrl"], timeout=10)
+    ws.settimeout(10)
+    ids = count(1)
+    try:
+        _send_cdp(ws, ids, "Network.enable")
+        _send_cdp(ws, ids, "Network.clearBrowserCookies")
+        _send_cdp(ws, ids, "Page.navigate", {"url": DOUYIN_URL})
+    finally:
+        ws.close()
+
+
 def _send_cdp(ws: object, ids: count, method: str, params: dict | None = None) -> dict:
     message_id = next(ids)
     ws.send(json.dumps({"id": message_id, "method": method, "params": params or {}}))
@@ -363,20 +392,4 @@ def _send_cdp(ws: object, ids: count, method: str, params: dict | None = None) -
 
 
 def _cookies_to_netscape(cookies: list[dict]) -> str:
-    lines = [
-        "# Netscape HTTP Cookie File",
-        "# Generated by VideoInsight Agent from a dedicated browser profile.",
-    ]
-    now = int(time())
-    for cookie in cookies:
-        domain = cookie.get("domain") or ".douyin.com"
-        include_subdomains = "TRUE" if domain.startswith(".") else "FALSE"
-        path = cookie.get("path") or "/"
-        secure = "TRUE" if cookie.get("secure") else "FALSE"
-        expires = int(cookie.get("expires") or cookie.get("expirationDate") or (now + 180 * 24 * 60 * 60))
-        name = cookie.get("name")
-        value = cookie.get("value", "")
-        if not name:
-            continue
-        lines.append(f"{domain}\t{include_subdomains}\t{path}\t{secure}\t{expires}\t{name}\t{value}")
-    return "\n".join(lines) + "\n"
+    return cookie_objects_to_netscape(cookies, source="dedicated browser profile")

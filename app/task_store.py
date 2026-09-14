@@ -125,7 +125,9 @@ class SQLiteTaskStore:
             sql += " AND status = ?"
             params.append(status.value)
 
-        sql += " ORDER BY created_at DESC LIMIT ?"
+        # created_at 只精确到秒，同秒创建的任务会并列；
+        # 用 rowid DESC 兜底，保证历史列表顺序稳定（后创建的排前面）。
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
         params.append(limit)
 
         with self._lock:

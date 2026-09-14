@@ -22,6 +22,7 @@ class MockLlmAnalyzer:
         mode: AnalysisMode,
         metadata: dict[str, Any] | None = None,
         include_timestamps: bool = False,
+        comments_text: str | None = None,
     ) -> str:
         if mode == AnalysisMode.transcript:
             return transcript
@@ -112,8 +113,15 @@ class OpenAICompatibleAnalyzer:
         mode: AnalysisMode,
         metadata: dict[str, Any] | None = None,
         include_timestamps: bool = False,
+        comments_text: str | None = None,
     ) -> str:
-        prompt = build_prompt(mode, transcript, metadata=metadata, include_timestamps=include_timestamps)
+        prompt = build_prompt(
+            mode,
+            transcript,
+            metadata=metadata,
+            include_timestamps=include_timestamps,
+            comments_text=comments_text,
+        )
         return self._complete(prompt)
 
     def chat(
@@ -144,14 +152,45 @@ class OpenAICompatibleAnalyzer:
                 timeout=120,
             )
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise WorkflowError(self._http_error_message(exc.response)) from exc
         except httpx.HTTPError as exc:
-            raise WorkflowError(f"LLM 调用失败：{exc}") from exc
+            raise WorkflowError("LLM 服务连接失败，请检查网络、API Base URL 后重试。") from exc
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise WorkflowError("LLM 返回了无法解析的响应，请检查 API Base URL 和模型配置。") from exc
         try:
             return str(data["choices"][0]["message"]["content"])
         except (KeyError, IndexError, TypeError) as exc:
             raise WorkflowError(f"LLM 返回内容格式异常：{data}") from exc
+
+    def _http_error_message(self, response: httpx.Response) -> str:
+        status_code = response.status_code
+        provider = self._provider_display_name()
+        if status_code == 401:
+            return f"{provider} API Key 无效或已过期，请检查密钥配置。"
+        if status_code == 402:
+            return (
+                f"{provider} 账户余额不足或尚未开通计费。请前往供应商控制台充值，"
+                "或在配置中切换到有可用额度的模型后重试。"
+            )
+        if status_code == 403:
+            return f"{provider} 拒绝了请求，请检查 API Key 权限和模型访问权限。"
+        if status_code == 429:
+            return f"{provider} 请求过于频繁或额度已用尽，请稍后重试或检查账户配额。"
+        if status_code >= 500:
+            return f"{provider} 服务暂时不可用（HTTP {status_code}），请稍后重试。"
+        return f"{provider} 请求失败（HTTP {status_code}），请检查模型与接口配置。"
+
+    def _provider_display_name(self) -> str:
+        provider = self._provider()
+        if provider == "deepseek":
+            return "DeepSeek"
+        if provider == "openai":
+            return "OpenAI"
+        return provider or "LLM"
 
     def _base_url(self) -> str:
         return self._base_url_override or self.settings.llm_base_url
@@ -173,4 +212,3 @@ class OpenAICompatibleAnalyzer:
         if not key:
             raise ExternalDependencyError("未配置 LLM API Key，请设置 DEEPSEEK_API_KEY 或 OPENAI_API_KEY。")
         return key
-

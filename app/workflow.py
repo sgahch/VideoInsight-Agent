@@ -4,11 +4,13 @@ import json
 from pathlib import Path
 
 from app.adapters.asr import MockTranscriber, ParaformerTranscriber, format_transcript
+from app.adapters.comment_fetcher import fetch_comments_for_url
 from app.adapters.downloader import select_downloader
 from app.adapters.llm import MockLlmAnalyzer, OpenAICompatibleAnalyzer
 from app.config import Settings, settings
 from app.errors import VideoInsightError
-from app.schemas import AnalysisMode, AnalysisResult, AnalyzeRequest, MediaInfo
+from app.prompts import render_comments_block
+from app.schemas import AnalysisMode, AnalysisResult, AnalyzeRequest, CommentItem, MediaInfo
 from app.task_store import SQLiteTaskStore
 
 # 提示词是否允许按时间戳组织大纲；workflow 当前传纯文本，保持 False（改 True 需同时传带时间戳的转写）
@@ -55,20 +57,44 @@ def _build_metadata(
 
 
 def _generate_output(
-    llm: MockLlmAnalyzer | OpenAICompatibleAnalyzer,
+    llm: MockLlmAnalyzer | OpenAICompatibleAnalyzer | None,
     mode: AnalysisMode,
     transcript_plain: str,
     metadata: dict[str, str],
+    comments_text: str | None = None,
 ) -> str:
     if mode == AnalysisMode.transcript:
         # 文字稿模式直接返回原文，跳过 LLM 调用（省时省钱）
         return transcript_plain
+    if llm is None:
+        raise RuntimeError("AI 分析模式缺少 LLM 分析器。")
     return llm.analyze(
         transcript_plain,
         mode,
         metadata=metadata,
         include_timestamps=_INCLUDE_TIMESTAMPS_IN_PROMPT,
+        comments_text=comments_text,
     )
+
+
+def _select_llm(
+    request: AnalyzeRequest,
+    use_mock: bool,
+    runtime_settings: Settings,
+) -> MockLlmAnalyzer | OpenAICompatibleAnalyzer | None:
+    if request.mode == AnalysisMode.transcript:
+        return None
+    if use_mock:
+        return MockLlmAnalyzer()
+    if request.llm_api_key:
+        return OpenAICompatibleAnalyzer(
+            runtime_settings,
+            provider=request.llm_provider,
+            base_url=request.llm_base_url,
+            model=request.llm_model,
+            api_key=request.llm_api_key,
+        )
+    return OpenAICompatibleAnalyzer(runtime_settings)
 
 
 def _strip_markdown(line: str) -> str:
@@ -169,7 +195,19 @@ def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = 
 
     downloader = select_downloader(str(request.url), runtime_settings.tmp_dir, use_mock)
     transcriber = MockTranscriber() if use_mock else ParaformerTranscriber(runtime_settings)
-    llm = MockLlmAnalyzer() if use_mock else OpenAICompatibleAnalyzer(runtime_settings)
+    llm = _select_llm(request, use_mock, runtime_settings)
+
+    # 观众评论抓取（可选、可降级）：不阻断主链路。
+    # 刻意排在下载/转写**之前**：评论区只是一次轻量 HTTP 请求（约 1 秒），
+    # 先拿到就不会被后面动辄十几分钟的下载+ASR 拖着；即使视频侧后续失败，
+    # 也已尽力拿到评论数据。
+    # 逐字稿模式同样抓取——虽然它不调 LLM（_generate_output 直接返回原文），
+    # 但前端「观众评论」面板要展示，不能让用户对着空白发懵。
+    comments: list[CommentItem] = []
+    comments_source: str | None = None
+    if request.with_comments:
+        comments, comments_source = fetch_comments_for_url(str(request.url), runtime_settings)
+    comments_text = render_comments_block(comments) if comments else None
 
     media = downloader.download_audio(str(request.url), task_id)
     segments = transcriber.transcribe(media.audio_path, task_id)
@@ -181,7 +219,8 @@ def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = 
         duration=media.duration,
         url=str(request.url),
     )
-    output = _generate_output(llm, request.mode, transcript_plain, metadata)
+
+    output = _generate_output(llm, request.mode, transcript_plain, metadata, comments_text=comments_text)
 
     media_info = MediaInfo(
         audio_path=str(media.audio_path) if media.audio_path else None,
@@ -196,7 +235,12 @@ def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = 
         segments=segments,
         output=output,
         media=media_info,
-        diagnostics={"mock_mode": use_mock},
+        comments=comments or None,
+        diagnostics={
+            "mock_mode": use_mock,
+            "comments_source": comments_source,
+            "comment_count": len(comments),
+        },
     )
     result.title = generate_result_title(output, request.mode, fallback=media_info.title)
     result_path = _write_result(runtime_settings.results_dir, task_id, result)
@@ -215,7 +259,7 @@ def analyze_media_file(
     use_mock = runtime_settings.mock_mode if request.use_mock is None else request.use_mock
 
     transcriber = MockTranscriber() if use_mock else ParaformerTranscriber(runtime_settings)
-    llm = MockLlmAnalyzer() if use_mock else OpenAICompatibleAnalyzer(runtime_settings)
+    llm = _select_llm(request, use_mock, runtime_settings)
 
     segments = transcriber.transcribe(media_path, task_id)
     transcript = format_transcript(segments, include_timestamps=True)

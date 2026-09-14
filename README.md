@@ -135,6 +135,7 @@ LLM_MODEL=deepseek-chat
 - `yt-dlp` 下载音频；
 - `ffmpeg` 转 16kHz 单声道 WAV；
 - DashScope Paraformer 非流式 ASR；
+- 长音频自动切片并发转写，默认超过 15 分钟切成 10 分钟片段，最多 3 路并行；
 - OpenAI-compatible Chat Completions 格式的 LLM 调用。
 
 ### 抖音等平台需要 cookies 时

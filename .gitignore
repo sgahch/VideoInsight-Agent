@@ -2,11 +2,18 @@
 __pycache__/
 .pytest_cache/
 .pytest_tmp/
+_pytest_tmp*/
+_pt_run_*/
+_pt*.txt
+_pytest_full.txt
+_git_*.txt
+_verify_*.log
 .env
 data/tmp/
 data/results/
 data/logs/
 data/*.db
+data/uvicorn.*.log
 media/
 *.pyc
 

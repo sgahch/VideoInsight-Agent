@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.browser_cookies import BrowserCookieError, capture_douyin_cookies, cookie_browser_status, start_cookie_browser
 from app.config import Settings, settings
-from app.adapters.downloader import default_cookies_file
+from app.adapters.downloader import cookie_storage_path
 from app.cookies import summarize_cookie_file
 
 
@@ -12,6 +12,8 @@ class QRLoginError(Exception):
 
 def start_qr_login(runtime_settings: Settings = settings) -> dict[str, object]:
     try:
+        # Reuse the persistent dedicated profile. Clearing it here forced a full
+        # QR/SMS login every time the user clicked the login button.
         browser = start_cookie_browser(runtime_settings)
     except BrowserCookieError as exc:
         raise QRLoginError(str(exc)) from exc
@@ -19,7 +21,7 @@ def start_qr_login(runtime_settings: Settings = settings) -> dict[str, object]:
         "session_id": "browser",
         "status": "waiting",
         "completed": False,
-        "message": "请在新打开的窗口里用抖音 App 扫码登录，本页会自动检测。",
+        "message": "请在专用抖音窗口中完成登录，本页会自动检测；如果已有登录态，通常无需再次扫码。",
         "browser": browser,
     }
 
@@ -70,5 +72,5 @@ def _payload(
         "message": message,
         "browser": browser_status,
         "capture": captured,
-        "cookies": summarize_cookie_file(default_cookies_file(runtime_settings)),
+        "cookies": summarize_cookie_file(cookie_storage_path(runtime_settings)),
     }

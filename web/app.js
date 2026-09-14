@@ -19,7 +19,7 @@
    * ==================================================================== */
 
   const POLL_INTERVAL_MS = 2000;
-  const POLL_MAX_ATTEMPTS = 150; // 约 5 分钟后停止轮询，避免无限请求
+  const POLL_MAX_ATTEMPTS = 3600; // 最多轮询约 2 小时，覆盖长视频下载与 ASR
   const QR_POLL_INTERVAL_MS = 3000;
   const QR_POLL_MAX_ATTEMPTS = 100; // 约 5 分钟
   const DEFAULT_TIMEOUT_MS = 20000;
@@ -75,6 +75,7 @@
     fileName: $("#fileName"),
     uploadMode: $("#uploadMode"),
     uploadReal: $("#uploadReal"),
+    uploadRealRow: $("#uploadRealRow"),
 
     // 链接分析
     linkForm: $("#linkForm"),
@@ -82,6 +83,12 @@
     videoUrl: $("#videoUrl"),
     linkMode: $("#linkMode"),
     linkReal: $("#linkReal"),
+    linkRealRow: $("#linkRealRow"),
+    linkPreview: $("#linkPreview"),
+    linkPreviewBadge: $("#linkPreviewBadge"),
+    linkPreviewUrl: $("#linkPreviewUrl"),
+    linkLabel: $("#linkLabel"),
+    linkPreviewNote: $("#linkPreviewNote"),
 
     // 任务状态
     taskStatusBadge: $("#taskStatusBadge"),
@@ -94,6 +101,7 @@
     // 结果区
     summaryOutput: $("#summaryOutput"),
     transcriptOutput: $("#transcriptOutput"),
+    commentsOutput: $("#commentsOutput"),
     rawOutput: $("#rawOutput"),
 
     // 媒体
@@ -160,6 +168,8 @@
     qrSessionId: null,
     qrTimer: null,
     qrAttempts: 0,
+    pendingCookieRetry: null,
+    parsedLink: null, // 最新的 /parse-link 解析结果（含干净 url 与建议标签）
   };
 
   /* ======================================================================
@@ -326,6 +336,39 @@
     return value.length > max ? `${value.slice(0, max)}…` : value;
   }
 
+  function isCookieFailure(message) {
+    const value = String(message || "").toLowerCase();
+    return value.includes("cookies 已失效") || value.includes("需要登录态 cookies");
+  }
+
+  function analysisModelPayload(mode, useMock) {
+    if (mode === "transcript" || useMock) {
+      return {};
+    }
+    const config = loadModelConfig();
+    if (!config) {
+      setTaskStatus("failed", "AI 总结或观点提取需要先配置 API Key；逐字稿提取无需配置。");
+      setModelMessage("请先保存 API Key，再重新提交 AI 分析。逐字稿提取不需要 API Key。", "error");
+      scrollToSettings();
+      return null;
+    }
+    return {
+      llm_provider: config.provider,
+      llm_base_url: config.baseUrl,
+      llm_model: config.model,
+      llm_api_key: config.apiKey,
+    };
+  }
+
+  function syncAnalysisModeUi() {
+    const uploadTranscript = els.uploadMode.value === "transcript";
+    const linkTranscript = els.linkMode.value === "transcript";
+    els.uploadRealRow.hidden = uploadTranscript;
+    els.linkRealRow.hidden = linkTranscript;
+    els.uploadSubmit.textContent = uploadTranscript ? "开始提取逐字稿" : "开始分析文件";
+    els.linkSubmit.textContent = linkTranscript ? "立即提取逐字稿" : "立即链接分析";
+  }
+
   /* ======================================================================
    * 5. 任务状态与结果渲染
    * ==================================================================== */
@@ -377,7 +420,7 @@
     state.currentTaskId = task.task_id;
 
     els.taskId.textContent = task.task_id;
-    els.taskSource.textContent = task.request ? task.request.url : "-";
+    els.taskSource.textContent = task.request && task.request.label ? task.request.label : (task.request ? task.request.url : "-");
     els.rawOutput.textContent = JSON.stringify(task, null, 2);
 
     renderMedia(task);
@@ -392,10 +435,25 @@
     } else if (task.status === "failed") {
       setTaskStatus("failed", task.error || "任务失败。");
       els.summaryOutput.textContent = task.error || "任务失败。";
+      if (task.request && isCookieFailure(task.error)) {
+        state.pendingCookieRetry = {
+          url: String(task.request.url || ""),
+          mode: task.request.mode || "summary",
+          useMock: Boolean(task.request.use_mock),
+        };
+        setCookieMessage(
+          "检测到抖音登录态失效。点击“登录/刷新抖音 Cookies”，扫码成功后会自动重试该链接。",
+          "error",
+        );
+        els.startQrLogin.textContent = "登录并自动重试该链接";
+      }
     } else if (task.status === "succeeded") {
       setTaskStatus("succeeded", "分析完成。");
       els.summaryOutput.innerHTML = renderMarkdown(task.result ? task.result.output : "无结果");
       els.transcriptOutput.textContent = (task.result && task.result.transcript) || "无逐字稿";
+      renderComments(task);
+    } else {
+      els.commentsOutput.textContent = "暂无观众评论";
     }
 
     updateAgentContext();
@@ -463,6 +521,57 @@
     els.mediaPanel.hidden = false;
   }
 
+  /** 渲染观众评论（按后端归一化后的 comments 树）。无评论时显示原因/状态。 */
+  function renderComments(task) {
+    const box = els.commentsOutput;
+    box.innerHTML = "";
+    const result = task.result || {};
+    const comments = result.comments;
+    if (!comments || !comments.length) {
+      const reason = (result.diagnostics && result.diagnostics.comments_source) || "未配置 MediaCrawler 评论源";
+      const empty = document.createElement("div");
+      empty.className = "comments-empty";
+      empty.textContent = reason;
+      box.appendChild(empty);
+      return;
+    }
+    const summary = document.createElement("div");
+    summary.className = "comments-summary";
+    summary.textContent = `共 ${comments.length} 条观众评论`;
+    box.appendChild(summary);
+    const list = document.createElement("ul");
+    list.className = "comment-list";
+    comments.forEach((comment) => list.appendChild(buildCommentNode(comment)));
+    box.appendChild(list);
+  }
+
+  function buildCommentNode(comment) {
+    const li = document.createElement("li");
+    li.className = "comment-item";
+    const head = document.createElement("div");
+    head.className = "comment-head";
+    const name = document.createElement("span");
+    name.className = "comment-author";
+    name.textContent = comment.author_nickname || "观众";
+    const like = document.createElement("span");
+    like.className = "comment-like";
+    like.textContent = "👍 " + (comment.like_count || 0);
+    head.appendChild(name);
+    head.appendChild(like);
+    const body = document.createElement("div");
+    body.className = "comment-body";
+    body.textContent = comment.content || "";
+    li.appendChild(head);
+    li.appendChild(body);
+    if (comment.sub_comments && comment.sub_comments.length) {
+      const sub = document.createElement("ul");
+      sub.className = "comment-sublist";
+      comment.sub_comments.forEach((subComment) => sub.appendChild(buildCommentNode(subComment)));
+      li.appendChild(sub);
+    }
+    return li;
+  }
+
   /* ======================================================================
    * 6. 任务提交与轮询
    * ==================================================================== */
@@ -492,7 +601,12 @@
       state.pollAttempts += 1;
       if (state.pollAttempts > POLL_MAX_ATTEMPTS) {
         stopPolling();
-        setTaskStatus("failed", "轮询超时：任务仍未完成，请稍后在历史任务中查看结果。");
+        setTaskStatus(
+          "running",
+          "任务仍在后台处理，长视频可能需要较长时间；请稍后在历史任务中查看结果。",
+          parseFloat(els.progressBar.style.width) || 0,
+        );
+        loadHistory().catch(() => {});
         return;
       }
       try {
@@ -531,11 +645,18 @@
       return;
     }
 
+    const mode = els.uploadMode.value;
+    const useMock = mode === "transcript" ? false : !els.uploadReal.checked;
+    const llmPayload = analysisModelPayload(mode, useMock);
+    if (llmPayload === null) {
+      return;
+    }
+
     const form = new FormData();
     form.append("file", file);
-    form.append("mode", els.uploadMode.value);
-    // 深度思考模式开 = 真实分析（use_mock=false），关 = Mock（use_mock=true）
-    form.append("use_mock", String(!els.uploadReal.checked));
+    form.append("mode", mode);
+    form.append("use_mock", String(useMock));
+    Object.entries(llmPayload).forEach(([key, value]) => form.append(key, value));
 
     els.uploadSubmit.disabled = true;
     els.uploadSubmit.textContent = "上传中...";
@@ -547,42 +668,117 @@
       setTaskStatus("failed", `提交失败：${error.message}`);
     } finally {
       els.uploadSubmit.disabled = false;
-      els.uploadSubmit.textContent = "开始分析文件";
+      syncAnalysisModeUi();
     }
   }
 
-  /** 链接分析。 */
-  async function submitLink(event) {
-    event.preventDefault();
-    const url = els.videoUrl.value.trim();
+  async function startLinkAnalysis({ url, mode, useMock, label }, automaticRetry = false) {
     if (!url) {
       setTaskStatus("failed", "请输入视频链接。");
       return;
     }
 
+    const llmPayload = analysisModelPayload(mode, useMock);
+    if (llmPayload === null) {
+      return;
+    }
+
     els.linkSubmit.disabled = true;
-    els.linkSubmit.textContent = "提交中...";
+    els.linkSubmit.textContent = automaticRetry ? "登录成功，正在重试..." : "提交中...";
     try {
+      const body = Object.assign({ url: url, mode: mode, use_mock: useMock }, llmPayload);
+      if (label) {
+        body.label = label;
+      }
       const data = await fetchJson(
         "/analyze",
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            url: url,
-            mode: els.linkMode.value,
-            use_mock: !els.linkReal.checked,
-          }),
+          body: JSON.stringify(body),
         },
         20000,
+      );
+      state.pendingCookieRetry = null;
+      els.startQrLogin.textContent = "登录/刷新抖音 Cookies";
+      els.videoUrl.value = url;
+      els.linkMode.value = mode;
+      setCookieMessage(
+        automaticRetry ? "Cookies 已刷新，链接任务已自动重新提交。" : "链接任务已提交。",
+        "ok",
       );
       startPolling(data.task_id);
     } catch (error) {
       setTaskStatus("failed", `提交失败：${error.message}`);
     } finally {
       els.linkSubmit.disabled = false;
-      els.linkSubmit.textContent = "立即链接分析";
+      syncAnalysisModeUi();
     }
+  }
+
+  /** 链接分析。 */
+  async function submitLink(event) {
+    event.preventDefault();
+    const mode = els.linkMode.value;
+    // 优先使用解析出的干净链接与标签；未解析（如纯链接）时退回输入框原文。
+    const parsed = state.parsedLink;
+    const url = (parsed && parsed.url) ? parsed.url : els.videoUrl.value.trim();
+    const label = (parsed && parsed.url && els.linkLabel.value.trim()) ? els.linkLabel.value.trim() : (parsed ? parsed.label : null);
+    await startLinkAnalysis({
+      url: url,
+      mode: mode,
+      useMock: mode === "transcript" ? false : !els.linkReal.checked,
+      label: label,
+    });
+  }
+
+  /** 防抖解析分享文案：实时调用 /parse-link 预览干净链接与可编辑标签。 */
+  function attachLinkParser() {
+    let timer = null;
+    els.videoUrl.addEventListener("input", () => {
+      const text = els.videoUrl.value.trim();
+      if (timer) {
+        clearTimeout(timer);
+      }
+      if (!text) {
+        state.parsedLink = null;
+        els.linkPreview.classList.add("hidden");
+        return;
+      }
+      timer = setTimeout(async () => {
+        try {
+          const data = await fetchJson("/parse-link", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: text }),
+          }, 8000);
+          state.parsedLink = data;
+          renderLinkPreview(data);
+        } catch (error) {
+          state.parsedLink = null;
+          els.linkPreview.classList.add("hidden");
+        }
+      }, 350);
+    });
+  }
+
+  /** 渲染解析预览：平台徽标 + 干净链接 + 可编辑标签。 */
+  function renderLinkPreview(data) {
+    els.linkPreviewBadge.textContent = data.platform || "未知平台";
+    els.linkPreviewBadge.className = `platform-badge platform-${String(data.platform || "").toLowerCase()}`;
+    els.linkPreviewUrl.textContent = data.url || "（未识别到链接）";
+    els.linkLabel.value = data.label || "";
+    els.linkPreviewNote.textContent = data.note || "";
+    els.linkPreview.classList.toggle("hidden", !data.url);
+  }
+
+  async function retryPendingCookieTask() {
+    if (!state.pendingCookieRetry) {
+      return;
+    }
+    const pending = state.pendingCookieRetry;
+    setCookieMessage("Cookies 已保存，正在自动重试刚才的链接...", "ok");
+    await startLinkAnalysis(pending, true);
   }
 
   /* ======================================================================
@@ -650,8 +846,9 @@
 
       const url = document.createElement("div");
       url.className = "history-mini-url";
-      url.textContent = truncate(task.request && task.request.url, 36);
-      url.title = (task.request && task.request.url) || "";
+      const labelText = task.request && task.request.label;
+      url.textContent = truncate(labelText || (task.request && task.request.url), 36);
+      url.title = labelText ? `${labelText}\n${task.request && task.request.url || ""}` : (task.request && task.request.url) || "";
 
       const meta = document.createElement("div");
       meta.className = "history-mini-meta";
@@ -784,6 +981,7 @@
       els.cookieText.value = "";
       setCookieMessage(`已保存 ${data.count} 条 Cookies（${data.size} bytes）。`, "ok");
       await refreshCookieStatus();
+      await retryPendingCookieTask();
     } catch (error) {
       setCookieMessage(`保存失败：${error.message}`, "error");
     }
@@ -803,6 +1001,7 @@
       const data = await fetchJson("/cookies", { method: "POST", body: form }, 15000);
       setCookieMessage(`已保存 ${data.count} 条 Cookies（${data.size} bytes）。`, "ok");
       await refreshCookieStatus();
+      await retryPendingCookieTask();
     } catch (error) {
       setCookieMessage(`保存失败：${error.message}`, "error");
     }
@@ -863,6 +1062,7 @@
         setQrMessage(status.message || "扫码登录成功，Cookies 已保存。");
         setCookieMessage(status.message || "扫码登录成功，Cookies 已保存。", "ok");
         await refreshCookieStatus();
+        await retryPendingCookieTask();
         return;
       }
       setQrMessage(status.message || "等待扫码确认...");
@@ -914,6 +1114,9 @@
         : "";
       setCookieMessage(`${savedText}，${loginState}${missing}。`, data.saved ? "ok" : "error");
       await refreshCookieStatus();
+      if (data.saved) {
+        await retryPendingCookieTask();
+      }
     } catch (error) {
       setCookieMessage(`抓取失败：${error.message}`, "error");
     }
@@ -1164,8 +1367,8 @@
     const config = loadModelConfig();
     if (!config) {
       els.modelState.className = "badge badge-danger";
-      els.modelState.textContent = "未配置，对话不可用";
-      els.modelState.title = "请先配置你的 API Key 才能使用 AI 对话";
+      els.modelState.textContent = "未配置（逐字稿可用）";
+      els.modelState.title = "AI 总结、观点提取和对话需要 API Key；逐字稿不需要";
       return;
     }
     els.modelState.className = "badge badge-success";
@@ -1366,6 +1569,10 @@
   function bindEvents() {
     els.uploadForm.addEventListener("submit", submitUpload);
     els.linkForm.addEventListener("submit", submitLink);
+    attachLinkParser();
+    els.uploadMode.addEventListener("change", syncAnalysisModeUi);
+    els.linkMode.addEventListener("change", syncAnalysisModeUi);
+    syncAnalysisModeUi();
     bindTabs();
     bindSidebarNav();
     bindDropZone();
