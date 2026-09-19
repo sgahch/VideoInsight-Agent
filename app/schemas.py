@@ -24,6 +24,12 @@ class ParseLinkRequest(BaseModel):
     text: str = Field(..., description="用户粘贴的分享文案或纯链接。")
 
 
+class AuthSessionRequest(BaseModel):
+    """用访问令牌换取 HttpOnly Cookie（供原生媒体请求使用鉴权）。"""
+
+    token: str = Field(..., description="服务端配置的共享访问令牌。")
+
+
 class AnalyzeRequest(BaseModel):
     url: str = Field(..., description="Video URL to analyze. 支持纯链接，也支持平台分享文案（会自动裁剪）。")
     label: str | None = Field(
@@ -118,6 +124,18 @@ class TaskRecord(BaseModel):
     updated_at: datetime
     result: AnalysisResult | None = None
     error: str | None = None
+    # 实时进度（仅运行时由 progress 模块推算，不持久化）：
+    # progress=百分比(0~100)，stage=阶段(downloading/transcribing/analyzing/done)，
+    # eta_seconds=预计剩余秒数。Mock 模式或重启后追踪缺失时为 None。
+    progress: float | None = None
+    stage: str | None = None
+    eta_seconds: float | None = None
+    media_duration_seconds: float | None = None
+    transcribe_done: int | None = None
+    transcribe_total: int | None = None
+    transcribe_seconds: float | None = None
+    elapsed_seconds: float | None = None
+    estimated_total_seconds: float | None = None
 
 
 class ChatRequest(BaseModel):

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import traceback
 from pathlib import Path
+from time import perf_counter
 
 from app.adapters.asr import MockTranscriber, ParaformerTranscriber, format_transcript
 from app.adapters.comment_fetcher import fetch_comments_for_url
@@ -11,7 +14,10 @@ from app.config import Settings, settings
 from app.errors import VideoInsightError
 from app.prompts import render_comments_block
 from app.schemas import AnalysisMode, AnalysisResult, AnalyzeRequest, CommentItem, MediaInfo
+from app.progress import ProgressReporter, drop_tracker, invalidate_calibration
 from app.task_store import SQLiteTaskStore
+
+LOGGER = logging.getLogger(__name__)
 
 # 提示词是否允许按时间戳组织大纲；workflow 当前传纯文本，保持 False（改 True 需同时传带时间戳的转写）
 _INCLUDE_TIMESTAMPS_IN_PROMPT = False
@@ -54,6 +60,24 @@ def _build_metadata(
         "platform": detect_platform(url),
         "duration": format_duration(duration),
     }
+
+
+def _discard_transcode_intermediate(audio_path: Path | None, task_id: str) -> None:
+    """转写完成后删掉 16kHz 中间 WAV。
+
+    它是 ASR 的内部输入（`ParaformerTranscriber` 生成），转写完就没有任何代码
+    再读它 —— `media.audio_path` 指向的是下载/上传的原始文件。一小时音频的
+    16kHz 单声道 WAV 约 115 MB，按任务长期留着纯属浪费。删除失败只记日志。
+    """
+    if audio_path is None:
+        return
+    for leftover in audio_path.parent.glob(f"{task_id}-*.wav"):
+        # 与 downloader/asr 的 _best_effort_unlink 同一约定：清理由 BaseException
+        # 兜底，某些解释器会把 unlink 拦成 SystemExit（不属于 Exception）。
+        try:
+            leftover.unlink(missing_ok=True)
+        except BaseException as exc:  # noqa: BLE001 - 清理路径，吞掉一切错误
+            LOGGER.warning("转码中间文件删除失败，已忽略：%s（%s）", leftover, exc)
 
 
 def _generate_output(
@@ -168,8 +192,22 @@ def run_analysis_task(task_id: str, request: AnalyzeRequest, store: SQLiteTaskSt
         store.set_failed(task_id, str(exc))
     except Exception as exc:  # Keep background task failures visible to API clients.
         store.set_failed(task_id, f"未预期错误：{exc}")
+    except BaseException as exc:  # noqa: BLE001
+        # SystemExit 不属于 Exception（如某些解释器把文件操作拦截成 SystemExit），
+        # 若不加这层会从 worker 逃逸，用户只会看到晦涩的 "任务执行异常：1"。
+        # worker 线程吞下它是对的：记录失败后线程自然结束，不能让它打断整个池。
+        LOGGER.error(
+            "任务 %s 被非 Exception 异常击穿（不应到达这里）：%s", task_id, exc, exc_info=exc
+        )
+        store.set_failed(
+            task_id,
+            f"任务中断（{type(exc).__name__}）：{exc} · "
+            + " | ".join(traceback.format_exception_only(type(exc), exc)).strip()[:300],
+        )
     else:
         store.set_succeeded(task_id, result)
+    finally:
+        drop_tracker(task_id)
 
 
 def run_file_analysis_task(
@@ -185,13 +223,27 @@ def run_file_analysis_task(
         store.set_failed(task_id, str(exc))
     except Exception as exc:
         store.set_failed(task_id, f"未预期错误：{exc}")
+    except BaseException as exc:  # noqa: BLE001
+        LOGGER.error(
+            "任务 %s 被非 Exception 异常击穿（不应到达这里）：%s", task_id, exc, exc_info=exc
+        )
+        store.set_failed(
+            task_id,
+            f"任务中断（{type(exc).__name__}）：{exc} · "
+            + " | ".join(traceback.format_exception_only(type(exc), exc)).strip()[:300],
+        )
     else:
         store.set_succeeded(task_id, result)
+    finally:
+        drop_tracker(task_id)
 
 
 def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = settings) -> AnalysisResult:
     runtime_settings.ensure_dirs()
     use_mock = runtime_settings.mock_mode if request.use_mock is None else request.use_mock
+    t0 = perf_counter()
+    # 真实模式才建追踪器：进度条用真实分片进度；Mock 模式不追踪（前端回退装饰性动画）。
+    reporter = ProgressReporter(task_id, request.mode.value, bool(use_mock)) if not use_mock else None
 
     downloader = select_downloader(str(request.url), runtime_settings.tmp_dir, use_mock)
     transcriber = MockTranscriber() if use_mock else ParaformerTranscriber(runtime_settings)
@@ -210,7 +262,17 @@ def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = 
     comments_text = render_comments_block(comments) if comments else None
 
     media = downloader.download_audio(str(request.url), task_id)
-    segments = transcriber.transcribe(media.audio_path, task_id)
+    if reporter is not None:
+        reporter.mark_download_done(media.duration)
+    asr_start = perf_counter()
+    segments = transcriber.transcribe(media.audio_path, task_id, reporter=reporter)
+    transcribe_seconds = perf_counter() - asr_start
+    # 视频总时长优先用转写器实测值（ffprobe）：比平台下发的 media.duration 更可靠，
+    # 快手等平台 media.duration 常为 None。
+    media_duration = transcriber.last_duration if transcriber.last_duration is not None else media.duration
+    if reporter is not None:
+        reporter.mark_transcribe_done(transcribe_seconds, media_duration)
+    _discard_transcode_intermediate(media.audio_path, task_id)
     transcript = format_transcript(segments, include_timestamps=True)
     transcript_plain = format_transcript(segments, include_timestamps=False)
     metadata = _build_metadata(
@@ -220,6 +282,8 @@ def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = 
         url=str(request.url),
     )
 
+    if reporter is not None:
+        reporter.mark_analyzing()
     output = _generate_output(llm, request.mode, transcript_plain, metadata, comments_text=comments_text)
 
     media_info = MediaInfo(
@@ -240,12 +304,25 @@ def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = 
             "mock_mode": use_mock,
             "comments_source": comments_source,
             "comment_count": len(comments),
+            "media_duration_seconds": round(media_duration, 2) if media_duration is not None else None,
+            "transcribe_seconds": round(transcribe_seconds, 2),
+            "total_seconds": round(perf_counter() - t0, 2),
+            "asr_speed_x": (
+                round(media_duration / transcribe_seconds, 2)
+                if media_duration and transcribe_seconds
+                else None
+            ),
         },
     )
     result.title = generate_result_title(output, request.mode, fallback=media_info.title)
     result_path = _write_result(runtime_settings.results_dir, task_id, result)
     result.artifacts["result_json"] = str(result_path)
     _write_result(runtime_settings.results_dir, task_id, result)
+    invalidate_calibration(runtime_settings.results_dir)
+
+    if reporter is not None:
+        reporter.mark_done()
+    _log_timing(task_id, media_duration, transcribe_seconds, perf_counter() - t0)
     return result
 
 
@@ -257,11 +334,32 @@ def analyze_media_file(
 ) -> AnalysisResult:
     runtime_settings.ensure_dirs()
     use_mock = runtime_settings.mock_mode if request.use_mock is None else request.use_mock
+    t0 = perf_counter()
+    # 真实模式才建追踪器：进度条用真实分片进度；Mock 模式不追踪（前端回退装饰性动画）。
+    reporter = (
+        ProgressReporter(
+            task_id,
+            request.mode.value,
+            bool(use_mock),
+            download_required=False,
+        )
+        if not use_mock
+        else None
+    )
+    if reporter is not None:
+        # 上传文件已经在请求阶段落盘，不应把固定的“下载耗时”算进 ETA。
+        reporter.mark_download_done(None)
 
     transcriber = MockTranscriber() if use_mock else ParaformerTranscriber(runtime_settings)
     llm = _select_llm(request, use_mock, runtime_settings)
 
-    segments = transcriber.transcribe(media_path, task_id)
+    asr_start = perf_counter()
+    segments = transcriber.transcribe(media_path, task_id, reporter=reporter)
+    transcribe_seconds = perf_counter() - asr_start
+    media_duration = transcriber.last_duration
+    if reporter is not None:
+        reporter.mark_transcribe_done(transcribe_seconds, media_duration)
+    _discard_transcode_intermediate(media_path, task_id)
     transcript = format_transcript(segments, include_timestamps=True)
     transcript_plain = format_transcript(segments, include_timestamps=False)
     metadata = _build_metadata(
@@ -270,6 +368,8 @@ def analyze_media_file(
         duration=None,
         url=str(request.url),
     )
+    if reporter is not None:
+        reporter.mark_analyzing()
     output = _generate_output(llm, request.mode, transcript_plain, metadata)
 
     media_info = MediaInfo(
@@ -285,12 +385,28 @@ def analyze_media_file(
         segments=segments,
         output=output,
         media=media_info,
-        diagnostics={"mock_mode": use_mock, "source": "upload"},
+        diagnostics={
+            "mock_mode": use_mock,
+            "source": "upload",
+            "media_duration_seconds": round(media_duration, 2) if media_duration is not None else None,
+            "transcribe_seconds": round(transcribe_seconds, 2),
+            "total_seconds": round(perf_counter() - t0, 2),
+            "asr_speed_x": (
+                round(media_duration / transcribe_seconds, 2)
+                if media_duration and transcribe_seconds
+                else None
+            ),
+        },
     )
     result.title = generate_result_title(output, request.mode, fallback=media_info.title)
     result_path = _write_result(runtime_settings.results_dir, task_id, result)
     result.artifacts["result_json"] = str(result_path)
     _write_result(runtime_settings.results_dir, task_id, result)
+    invalidate_calibration(runtime_settings.results_dir)
+
+    if reporter is not None:
+        reporter.mark_done()
+    _log_timing(task_id, media_duration, transcribe_seconds, perf_counter() - t0)
     return result
 
 
@@ -302,3 +418,21 @@ def _write_result(results_dir: Path, task_id: str, result: AnalysisResult) -> Pa
         encoding="utf-8",
     )
     return result_path
+
+
+def _log_timing(
+    task_id: str,
+    media_duration: float | None,
+    transcribe_seconds: float,
+    total_seconds: float,
+) -> None:
+    """把「视频总时长 / 转写用时 / 总用时」打到服务日志，方便量化提速效果。"""
+    speed = f"，约 {media_duration / transcribe_seconds:.1f}× 实时" if media_duration and transcribe_seconds else ""
+    LOGGER.info(
+        "任务 %s 完成：视频时长 %.1fs，转写用时 %.1fs，总用时 %.1fs%s",
+        task_id,
+        media_duration or 0.0,
+        transcribe_seconds,
+        total_seconds,
+        speed,
+    )

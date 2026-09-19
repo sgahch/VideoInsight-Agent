@@ -22,6 +22,9 @@ from app.errors import ExternalDependencyError, WorkflowError
 
 LOGGER = logging.getLogger(__name__)
 DOWNLOAD_RETRY_COUNT = 3
+# yt-dlp 单次尝试的超时上限（重试由 _run_yt_dlp_with_cookie_recovery 负责，
+# 但超时不重试：4 次 × 30 分钟会把一个线程池工人占满两小时）。
+DOWNLOAD_TIMEOUT_SECONDS = 1800
 
 
 @dataclass(frozen=True)
@@ -219,7 +222,6 @@ class KuaishouDownloader:
                 follow_redirects=True,
                 timeout=20,
                 headers={"User-Agent": self.MOBILE_UA},
-                verify=False,
                 trust_env=False,
             )
         except httpx.HTTPError as exc:
@@ -235,7 +237,6 @@ class KuaishouDownloader:
                 f"https://v.m.chenzhongtech.com/fw/photo/{photo_id}",
                 timeout=25,
                 headers={"User-Agent": self.MOBILE_UA},
-                verify=False,
                 trust_env=False,
             )
         except httpx.HTTPError as exc:
@@ -278,7 +279,6 @@ class KuaishouDownloader:
                 url,
                 timeout=120,
                 headers={"User-Agent": self.MOBILE_UA},
-                verify=False,
                 follow_redirects=True,
                 trust_env=False,
             ) as response:
@@ -314,7 +314,9 @@ class DouyinShareDownloader:
         "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
     )
     SHARE_PAGE_URL = "https://m.douyin.com/share/video/{video_id}/"
-    PLAY_URL = "https://aweme.snssdk.com/aweme/v1/play/?video_id={uri}&ratio=1080p&line=0"
+    PLAY_URL = "https://aweme.snssdk.com/aweme/v1/play/?video_id={uri}&ratio={ratio}&line=0"
+    # 「下载源视频」用原画质；转写只取音轨，画质不影响识别，故用 douyin_audio_ratio。
+    DEFAULT_VIDEO_RATIO = "1080p"
     _ROUTER_DATA_RE = re.compile(r"window\._ROUTER_DATA\s*=\s*(\{.*?\})\s*;?\s*</script>", re.S)
     # CDN 偶发返回几十字节的风控占位内容；小于该阈值一律视为失败并重试。
     _MIN_VIDEO_BYTES = 10_000
@@ -329,7 +331,8 @@ class DouyinShareDownloader:
         task_dir = self.tmp_dir / task_id
         task_dir.mkdir(parents=True, exist_ok=True)
         audio_path = task_dir / f"douyin-{video_id}.mp4"
-        self._download_mp4(item, audio_path)
+        # 转写只需要音轨：用低画质档位（默认 480p）大幅减少下载体积与耗时。
+        self._download_mp4(item, audio_path, ratio=self._audio_ratio())
         duration_ms = (item.get("video") or {}).get("duration")
         return DownloadedMedia(
             audio_path=audio_path,
@@ -340,18 +343,29 @@ class DouyinShareDownloader:
         )
 
     def download_video(self, url: str, task_id: str) -> Path:
-        """按需下载完整视频（含画面）；与 download_audio 同源，已下载则直接复用。"""
+        """按需下载完整视频（含画面，原画质）。
+
+        download_audio 为了省流量默认取低画质（只要音轨），因此**只有**它取的
+        就是原画质时才能复用；否则必须单独下原画质，避免把降质版当成「源视频」
+        交给用户。
+        """
         video_id = self._resolve_video_id(url)
         task_dir = self.tmp_dir / task_id
         task_dir.mkdir(parents=True, exist_ok=True)
-        audio_copy = task_dir / f"douyin-{video_id}.mp4"
-        if not (audio_copy.is_file() and audio_copy.stat().st_size >= self._MIN_VIDEO_BYTES):
-            item = self._fetch_item(video_id)
-            self._download_mp4(item, audio_copy)
         target = task_dir / f"{video_id}.video.mp4"
-        # 覆盖旧文件：删除失败不能中断（文件被占用/只读目录），copyfile 会直接覆盖。
-        _best_effort_unlink(target)
-        shutil.copyfile(audio_copy, target)
+        audio_copy = task_dir / f"douyin-{video_id}.mp4"
+        reusable = (
+            self._audio_ratio() == self.DEFAULT_VIDEO_RATIO
+            and audio_copy.is_file()
+            and audio_copy.stat().st_size >= self._MIN_VIDEO_BYTES
+        )
+        if reusable:
+            # 覆盖旧文件：删除失败不能中断（文件被占用/只读目录），copyfile 会直接覆盖。
+            _best_effort_unlink(target)
+            shutil.copyfile(audio_copy, target)
+            return target
+        item = self._fetch_item(video_id)
+        self._download_mp4(item, target, ratio=self.DEFAULT_VIDEO_RATIO)
         return target
 
     def _resolve_video_id(self, url: str) -> str:
@@ -380,7 +394,6 @@ class DouyinShareDownloader:
                 },
                 follow_redirects=True,
                 timeout=25,
-                verify=False,
                 trust_env=False,
             )
         except httpx.HTTPError as exc:
@@ -434,14 +447,25 @@ class DouyinShareDownloader:
             pairs.setdefault(name, value)
         return "; ".join(f"{name}={value}" for name, value in pairs.items())
 
-    def _download_mp4(self, item: dict, target: Path) -> None:
+    def _audio_ratio(self) -> str:
+        """转写只需音轨，用低画质档位换下载体积（默认 480p）。"""
+        return (settings.douyin_audio_ratio or self.DEFAULT_VIDEO_RATIO).strip()
+
+    def _download_mp4(self, item: dict, target: Path, ratio: str | None = None) -> None:
         play_addr = (item.get("video") or {}).get("play_addr") or {}
         uri = play_addr.get("uri")
         url_list = [u for u in (play_addr.get("url_list") or []) if u]
         if not uri and not url_list:
             raise WorkflowError("该抖音作品没有可下载的视频流（可能为图文笔记），请改用上传文件分析。")
 
-        candidates = [self.PLAY_URL.format(uri=uri)] if uri else []
+        ratio = ratio or self.DEFAULT_VIDEO_RATIO
+        candidates: list[str] = []
+        if uri:
+            candidates.append(self.PLAY_URL.format(uri=uri, ratio=ratio))
+            # 指定画质不可用时先退回原画质，再不行才用带水印直链：
+            # 避免「低画质不存在」直接把任务带崩。
+            if ratio != self.DEFAULT_VIDEO_RATIO:
+                candidates.append(self.PLAY_URL.format(uri=uri, ratio=self.DEFAULT_VIDEO_RATIO))
         candidates += url_list  # playwm 直链做兜底（带水印但可用）
         errors: list[str] = []
         for candidate in candidates:
@@ -472,7 +496,6 @@ class DouyinShareDownloader:
             url,
             timeout=180,
             headers={"User-Agent": self.MOBILE_UA, "Referer": "https://m.douyin.com/"},
-            verify=False,
             follow_redirects=True,
             trust_env=False,
         ) as response:
@@ -539,7 +562,7 @@ def canonicalize_douyin_url(value: str) -> str:
 
 def resolve_douyin_short_url(url: str) -> str:
     try:
-        response = httpx.get(url, follow_redirects=False, verify=False, timeout=10, trust_env=False)
+        response = httpx.get(url, follow_redirects=False, timeout=10, trust_env=False)
     except httpx.HTTPError:
         return url
 
@@ -594,21 +617,34 @@ def _best_effort_unlink(path: Path) -> None:
 
 
 def _run_yt_dlp(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    """运行 yt-dlp，忽略失效的系统代理，避免本地代理关闭导致下载失败。"""
+    """运行 yt-dlp，忽略失效的系统代理，避免本地代理关闭导致下载失败。
+
+    timeout 是必须的：没有它，一个挂死的 yt-dlp 会永久占住一个线程池工人
+    （后台长任务与所有同步端点共用同一个池），服务会逐渐失去响应。
+    这里刻意让超时直接抛 WorkflowError 而不是返回非 0 码——否则外层
+    cookie 恢复逻辑会把「超时」当成可重试失败，再跑 3 轮。
+    """
     environment = os.environ.copy()
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         environment.pop(name, None)
     environment["NO_PROXY"] = "*"
     environment["no_proxy"] = "*"
-    return subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-        env=environment,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            env=environment,
+            timeout=DOWNLOAD_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise WorkflowError(
+            f"下载超过 {DOWNLOAD_TIMEOUT_SECONDS // 60} 分钟仍未完成，已中止。"
+            "请确认网络可达，或改用「上传文件分析」绕开平台下载。"
+        ) from exc
 
 
 def _cookie_args(cookies_file: Path | None, task_dir: Path) -> list[str]:

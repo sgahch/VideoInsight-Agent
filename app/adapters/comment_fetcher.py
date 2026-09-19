@@ -296,7 +296,6 @@ class DouyinCommentFetcher:
                 self.COMMENT_API.format(video_id=video_id),
                 headers={"User-Agent": self.MOBILE_UA},
                 timeout=15,
-                verify=False,
                 trust_env=False,
             )
             response.raise_for_status()

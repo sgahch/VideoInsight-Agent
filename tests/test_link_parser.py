@@ -31,6 +31,14 @@ def test_clean_douyin_url() -> None:
     assert parsed.is_share_text is False
 
 
+def test_markdown_link_extracts_inner_url() -> None:
+    parsed = parse_share_text("[https://v.douyin.com/G7m8cLTAtnY](https://v.douyin.com/G7m8cLTAtnY)")
+    assert parsed.url == "https://v.douyin.com/G7m8cLTAtnY"
+    assert parsed.title is None
+    assert parsed.platform == "抖音"
+    assert "干净链接" in parsed.note
+
+
 def test_bilibili_share_text() -> None:
     text = "【老高与小茉】为什么人类会做梦？ https://www.bilibili.com/video/BV1xx411c7mD/ 复制打开看看"
     parsed = parse_share_text(text)

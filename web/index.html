@@ -187,6 +187,26 @@
           <span id="taskMessage" class="task-message">等待提交任务...</span>
           <span id="progressPercent">0%</span>
         </div>
+
+        <!-- 分析计时统计（任务完成后显示，便于量化下载/转写速度） -->
+        <div id="timingStats" class="timing-stats" hidden>
+          <div class="timing-pill">
+            <span class="timing-label">原视频时长</span>
+            <span id="timingDuration" class="timing-value">-</span>
+          </div>
+          <div class="timing-pill">
+            <span class="timing-label">转录用时</span>
+            <span id="timingTranscribe" class="timing-value">-</span>
+          </div>
+          <div class="timing-pill">
+            <span class="timing-label">总用时</span>
+            <span id="timingTotal" class="timing-value">-</span>
+          </div>
+          <div class="timing-pill highlight">
+            <span class="timing-label">转写速度</span>
+            <span id="timingSpeed" class="timing-value">-</span>
+          </div>
+        </div>
       </section>
 
       <!-- 媒体播放与分析结果 -->
@@ -212,7 +232,14 @@
 
         <!-- 输出显示框 -->
         <div id="summaryOutput" class="output-box is-prose" role="tabpanel">等待分析任务完成后显示结果...</div>
-        <div id="transcriptOutput" class="output-box" style="display: none;" role="tabpanel">暂无逐字稿</div>
+        <div id="transcriptToolbar" class="transcript-toolbar" hidden>
+          <span class="transcript-toolbar-hint">按时间段整理，点击时间可快速定位内容</span>
+          <div class="transcript-toolbar-actions">
+            <span id="transcriptCopyStatus" class="transcript-copy-status" aria-live="polite"></span>
+            <button id="copyTranscriptBtn" class="btn btn-secondary transcript-copy-btn" type="button" title="复制带时间戳的完整逐字稿">复制全文</button>
+          </div>
+        </div>
+        <div id="transcriptOutput" class="output-box transcript-output" style="display: none;" role="tabpanel">暂无逐字稿</div>
         <div id="commentsOutput" class="output-box" style="display: none;" role="tabpanel">暂无观众评论</div>
         <div id="rawOutput" class="output-box" style="display: none;" role="tabpanel">{}</div>
       </section>
@@ -221,9 +248,14 @@
       <section id="agent" class="card-panel agent-chat-card">
         <div class="agent-chat-header">
           <div class="card-title">
-            <span>🤖</span> VideoInsight AI Agent 助手
+            <span>🤖</span> VideoInsight AI Agent 助手v4.0
           </div>
-          <span id="agentContext" class="badge badge-muted">未选择任务</span>
+          <div class="agent-chat-actions" style="display:flex;align-items:center;gap:8px;">
+            <span id="agentContext" class="badge badge-muted">未选择任务</span>
+            <button id="newChatBtn" class="btn btn-secondary" type="button"
+              style="padding:6px 12px;font-size:12px;"
+              title="清空当前展示的会话，开始一段新对话（不会删除任何历史任务）">＋ 新建干净对话</button>
+          </div>
         </div>
 
         <!-- 对话消息列表 -->
@@ -358,10 +390,37 @@
         </div>
       </section>
 
+      <section id="auth" class="card-panel" hidden>
+        <div class="card-header">
+          <div class="card-title"><span>🔑</span> 访问令牌</div>
+          <span id="authState" class="badge badge-muted">未验证</span>
+        </div>
+
+        <p class="settings-note">
+          本服务启用了访问鉴权。令牌由部署者在 <code>VIDEOINSIGHT_AUTH_TOKEN</code> 中设置，
+          填一次即可长期有效。
+        </p>
+
+        <div class="cookie-box">
+          <div class="form-group">
+            <label class="form-label" for="authToken">访问令牌</label>
+            <input id="authToken" type="password" class="form-input" placeholder="部署者提供的令牌" autocomplete="off" />
+          </div>
+
+          <div class="flex-between">
+            <span id="authMessage" class="cookie-message"></span>
+            <div style="display: flex; gap: 10px;">
+              <button id="clearAuthToken" class="btn btn-secondary" type="button">清除</button>
+              <button id="saveAuthToken" class="btn" type="button">验证并保存</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
     </main>
   </div>
 
-  <script src="/static/app.js?v=20260905-1"></script>
+  <script src="/static/app.js?v=20260918-1"></script>
 </body>
 
 </html>

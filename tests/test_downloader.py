@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app.config import Settings
 from app.adapters.downloader import is_kuaishou_url
 from app.adapters.downloader import KuaishouDownloader
@@ -102,6 +104,32 @@ def test_run_yt_dlp_ignores_proxy_environment(monkeypatch) -> None:
     assert "HTTP_PROXY" not in environment
     assert "HTTPS_PROXY" not in environment
     assert environment["NO_PROXY"] == "*"
+
+
+def test_yt_dlp_timeout_aborts_without_retrying(monkeypatch) -> None:
+    """回归：yt-dlp 挂死必须被超时中止，且不能进入重试循环。
+
+    没有超时，一个挂死的 yt-dlp 会永久占住一个线程池工人（后台长任务与所有
+    同步端点共用同一个池），服务会逐渐失去响应。而超时若当成可重试失败，
+    4 次 × 超时上限会把那个工人占满数小时，所以必须直接抛错。
+    """
+    import subprocess
+
+    from app.errors import WorkflowError
+
+    sleeps: list[float] = []
+
+    def fake_run(cmd, **kwargs):
+        assert kwargs["timeout"] == downloader_module.DOWNLOAD_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(downloader_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(downloader_module, "sleep", sleeps.append)
+
+    with pytest.raises(WorkflowError, match="超过"):
+        _run_yt_dlp_with_cookie_recovery(["yt-dlp", "https://example.com/video"])
+
+    assert sleeps == []  # 未重试
 
 
 def test_detects_fresh_cookie_retry_condition() -> None:

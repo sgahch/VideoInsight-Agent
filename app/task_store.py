@@ -110,16 +110,19 @@ class SQLiteTaskStore:
         status: TaskStatus | None = None,
         client_id: str | None = None,
     ) -> list[TaskRecord]:
-        """列出任务。
+        """列出任务，按 client_id **严格**归属过滤。
 
-        仅返回指定 client_id 创建的任务；client_id 为 None（未提供身份）时
-        返回空列表，避免无归属的老数据或他人任务被任何客户端看到。
+        无身份（client_id=None）只能看到同样无身份的任务；带身份时只能看到
+        自己的任务。两条边都必须严格匹配，否则会同时出现两个不一致的后果：
+        「提交时忘带身份 → 任务创建成功但永远列不出来」，以及「无归属任务
+        被任意身份读取/删除」。SQLite 里无归属存为 NULL，不能用 `= ?` 比较。
         """
         if client_id is None:
-            return []
-
-        sql = "SELECT * FROM tasks WHERE client_id = ?"
-        params: list[object] = [client_id]
+            sql = "SELECT * FROM tasks WHERE client_id IS NULL"
+            params: list[object] = []
+        else:
+            sql = "SELECT * FROM tasks WHERE client_id = ?"
+            params = [client_id]
 
         if status is not None:
             sql += " AND status = ?"
@@ -156,6 +159,56 @@ class SQLiteTaskStore:
                 return cursor.rowcount > 0
             finally:
                 conn.close()
+
+    def all_task_ids(self) -> set[str]:
+        """库里全部 task_id，供产物回收判断哪些目录已经成了孤儿。"""
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute("SELECT task_id FROM tasks").fetchall()
+            finally:
+                conn.close()
+        return {row["task_id"] for row in rows}
+
+    def task_ids_with_status(self, *statuses: TaskStatus) -> set[str]:
+        """指定状态的任务 id 集合（回收中间产物时用来排除仍在跑的任务）。"""
+        if not statuses:
+            return set()
+        placeholders = ", ".join("?" for _ in statuses)
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    f"SELECT task_id FROM tasks WHERE status IN ({placeholders})",
+                    [status.value for status in statuses],
+                ).fetchall()
+            finally:
+                conn.close()
+        return {row["task_id"] for row in rows}
+
+    def delete_created_before(self, cutoff: datetime) -> list[str]:
+        """删除创建时间早于 cutoff 的任务记录，返回被删的 task_id。
+
+        刻意分成「先查再删」两步：调用方拿到 id 才能一并清掉磁盘上的产物，
+        否则记录没了、目录还在，反而变成回收器要处理的孤儿。
+        created_at 存的是 isoformat(timespec="seconds")，文本比较对 ISO 时间安全。
+        """
+        stamp = cutoff.isoformat(timespec="seconds")
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT task_id FROM tasks WHERE created_at < ?", (stamp,)
+                ).fetchall()
+                task_ids = [row["task_id"] for row in rows]
+                if task_ids:
+                    conn.executemany(
+                        "DELETE FROM tasks WHERE task_id = ?", [(task_id,) for task_id in task_ids]
+                    )
+                    conn.commit()
+            finally:
+                conn.close()
+        return task_ids
 
     def _update(self, task_id: str, **updates: object) -> None:
         fields: dict[str, object] = {}

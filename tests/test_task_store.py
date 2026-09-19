@@ -32,14 +32,25 @@ def test_list_order_and_status_filter(tmp_path: Path) -> None:
     assert store.list_tasks(status=TaskStatus.failed, client_id="c1") == []
 
 
-def test_list_tasks_requires_client_id(tmp_path: Path) -> None:
-    """任务按 client_id 隔离：未带身份返回空，他人身份看不到。"""
-    store = SQLiteTaskStore(tmp_path / "tasks.db")
-    task = store.create(_request("https://example.com/a", client_id="c1"))
+def test_list_tasks_scopes_to_exact_client_id(tmp_path: Path) -> None:
+    """任务按 client_id **严格**归属过滤。
 
-    assert store.list_tasks() == []
+    他人身份看不到自己的任务；无归属任务只属于"无身份"这个命名空间，
+    不会被带身份的调用方看到（反之亦然）。
+    """
+    store = SQLiteTaskStore(tmp_path / "tasks.db")
+    owned = store.create(_request("https://example.com/a", client_id="c1"))
+    anonymous = store.create(_request("https://example.com/b"))
+
+    # 他人身份：看不到 c1 的任务
     assert store.list_tasks(client_id="c2") == []
-    assert [t.task_id for t in store.list_tasks(client_id="c1")] == [task.task_id]
+    assert [t.task_id for t in store.list_tasks(client_id="c1")] == [owned.task_id]
+
+    # 无身份：只看得到无归属任务。此前这里直接返回 []，导致不带身份提交的
+    # 任务创建成功却永远列不出来（数据黑洞）。
+    assert [t.task_id for t in store.list_tasks()] == [anonymous.task_id]
+    # 反过来，带身份也看不到无归属任务
+    assert anonymous.task_id not in {t.task_id for t in store.list_tasks(client_id="c1")}
 
 
 def test_succeeded_roundtrip(tmp_path: Path) -> None:

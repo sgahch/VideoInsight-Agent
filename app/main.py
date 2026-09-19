@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 from collections.abc import AsyncIterator
 from pathlib import Path
-import shutil
 
-from fastapi import BackgroundTasks, Cookie, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import Cookie, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.cleanup import remove_task_artifacts, run_cleanup
 from app.config import settings
 from app.adapters.asr import format_transcript
 from app.adapters.downloader import YtDlpDownloader, default_cookies_file, resolve_cookies_file, select_downloader
@@ -23,14 +25,32 @@ from app.schemas import (
     AnalysisResult,
     AnalyzeRequest,
     AnalyzeResponse,
+    AuthSessionRequest,
     ChatRequest,
     ChatResponse,
     ParseLinkRequest,
     TaskRecord,
     TaskStatus,
 )
-from app.task_store import SQLiteTaskStore, task_store
+from app.security import (
+    AUTH_COOKIE_MAX_AGE,
+    AUTH_COOKIE_NAME,
+    auth_middleware,
+    token_matches,
+)
+from app.task_store import task_store
+from app.task_queue import PendingTask, TaskQueue, reconcile_interrupted_tasks
 from app.workflow import detect_platform, format_duration, run_analysis_task, run_file_analysis_task
+from app.progress import get_snapshot
+
+
+LOGGER = logging.getLogger(__name__)
+
+# 上传落盘的读写块大小。
+UPLOAD_CHUNK_BYTES = 1 << 20
+
+# 长任务走专用有界线程池，不再用 BackgroundTasks 挤占请求处理线程池。
+task_queue = TaskQueue(settings.max_concurrent_tasks)
 
 
 def _client_id_from_header(x_client_id: str | None = None) -> str | None:
@@ -50,19 +70,90 @@ def _client_id_from_media_request(
 
 
 def _owned_task(task_id: str, client_id: str | None) -> TaskRecord | None:
-    """按归属取任务：无归属（老数据）或属于该客户端的任务可访问，他人任务视为不存在。"""
+    """按归属取任务：请求身份必须与任务归属**严格一致**，否则视为不存在。
+
+    无归属（client_id=NULL）的任务只对同样无身份的请求可见。这里此前写作
+    `if task.request.client_id and task.request.client_id != client_id`，
+    等于把无归属任务对任意身份开放——任何带 X-Client-Id 的调用方都能读取、
+    删除，并能对它发起 /chat（消耗服务端 LLM 额度）。
+    """
     task = task_store.get(task_id)
     if task is None:
         return None
-    if task.request.client_id and task.request.client_id != client_id:
+    if task.request.client_id != client_id:
         return None
     return task
+
+
+def _resume_task(item: PendingTask) -> None:
+    """按任务类型分派重新入队的工作（重启对账用）。"""
+    if item.media_path is None:
+        task_queue.submit(
+            item.task_id, task_store, run_analysis_task, item.task_id, item.request, task_store
+        )
+    else:
+        task_queue.submit(
+            item.task_id,
+            task_store,
+            run_file_analysis_task,
+            item.task_id,
+            item.request,
+            item.media_path,
+            task_store,
+        )
+
+
+def _run_artifact_cleanup() -> None:
+    """同步执行一次产物回收，失败只记日志——回收绝不能影响服务启动。"""
+    try:
+        report = run_cleanup(task_store, settings)
+    except Exception as exc:  # noqa: BLE001 - 回收是尽力而为的后台动作
+        LOGGER.warning("产物回收失败，已跳过：%s", exc)
+        return
+    if report.dirs_removed or report.files_removed or report.tasks_removed:
+        LOGGER.info(
+            "产物回收完成：目录 %s 个、中间文件 %s 个、任务记录 %s 条、释放 %.1f MB",
+            report.dirs_removed,
+            report.files_removed,
+            report.tasks_removed,
+            report.megabytes_reclaimed,
+        )
+    for error in report.errors:
+        LOGGER.warning("产物回收遗留错误：%s", error)
+
+
+async def _periodic_cleanup() -> None:
+    """按 cleanup_interval_hours 周期回收产物；<=0 表示关闭。"""
+    interval_seconds = settings.cleanup_interval_hours * 3600
+    if interval_seconds <= 0:
+        return
+    while True:
+        await asyncio.sleep(interval_seconds)
+        # 回收是阻塞 IO，丢到线程里跑，别卡住事件循环。
+        await asyncio.to_thread(_run_artifact_cleanup)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings.ensure_dirs()
-    yield
+    # 挂载事件循环异常处理器，屏蔽客户端断连噪音（WinError 10054）。
+    _install_loop_exception_handler()
+    # 启动时先对账一次：把上一次运行遗留的孤儿目录清掉，
+    # 并把被杀死的进程留下的僵尸任务收敛掉（running → 失败，queued → 重新入队）。
+    await asyncio.to_thread(_run_artifact_cleanup)
+    report = await asyncio.to_thread(reconcile_interrupted_tasks, task_store, settings)
+    for item in report.pending:
+        _resume_task(item)
+
+    cleanup_task = asyncio.create_task(_periodic_cleanup())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
+        # 不等待：正在跑的下载/转写没法安全打断，留给进程退出处理。
+        task_queue.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -71,6 +162,33 @@ app = FastAPI(
     description="Phase 1 MVP for video link transcription and structured analysis.",
     lifespan=lifespan,
 )
+
+
+def _suppress_client_disconnects(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    """屏蔽 Windows Proactor 事件循环里的客户端主动断连噪音。
+
+    浏览器在拖动进度条、取消视频/音频流式下载时会直接重置 TCP 连接，Starlette
+    的 FileResponse 流式发送随即触发 ConnectionResetError / BrokenPipeError。这些
+    异常逃逸到 Proactor 的 `_call_connection_lost` 回调后，Python 3.13 会打印整段
+    traceback，并在累积后导致 uvicorn 进程退出——但它们并非服务端错误。
+
+    这里把它们降级为 debug 日志，避免污染输出、也避免进程被这类噪音拖垮。
+    """
+    exc = context.get("exception")
+    if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+        LOGGER.debug("Ignored client disconnect: %s", exc)
+        return
+    loop.default_exception_handler(context)
+
+
+def _install_loop_exception_handler() -> None:
+    """在事件循环上挂载断连抑制器（幂等，随主循环启动时调用）。"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.set_exception_handler(_suppress_client_disconnects)
+
 
 
 @app.middleware("http")
@@ -86,6 +204,11 @@ async def persist_client_session(request: Request, call_next):
             samesite="strict",
         )
     return response
+
+
+# 放在 persist_client_session 之后注册 —— Starlette 里后注册的中间件在最外层，
+# 因此鉴权会先于其他任何处理执行，未授权请求不会走到业务逻辑。
+app.middleware("http")(auth_middleware)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = PROJECT_ROOT / "web"
@@ -107,6 +230,8 @@ def health() -> dict[str, object]:
     return {
         "status": "ok",
         "mock_mode": settings.mock_mode,
+        # 前端据此决定是否要求用户填访问令牌
+        "auth_required": settings.auth_token is not None,
         "tmp_dir": str(settings.tmp_dir),
         "results_dir": str(settings.results_dir),
         "media_dir": str(settings.media_dir),
@@ -119,6 +244,34 @@ def health() -> dict[str, object]:
             else "douyin-builtin"
         ),
     }
+
+
+@app.post("/auth/session")
+def create_auth_session(payload: AuthSessionRequest, response: Response) -> dict[str, object]:
+    """用访问令牌换取 HttpOnly Cookie。
+
+    浏览器的 `<video src>` / `<a href>` 没法带自定义请求头，媒体预览和下载必须
+    靠 Cookie 才能通过鉴权。这个端点是公开的 —— 它本身就是校验令牌的地方。
+    """
+    expected = settings.auth_token
+    if expected is None:
+        return {"authenticated": True, "auth_required": False}
+    if not token_matches(payload.token, expected):
+        raise HTTPException(status_code=401, detail="访问令牌不正确。")
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        payload.token,
+        max_age=AUTH_COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+    )
+    return {"authenticated": True, "auth_required": True}
+
+
+@app.delete("/auth/session")
+def delete_auth_session(response: Response) -> dict[str, object]:
+    response.delete_cookie(AUTH_COOKIE_NAME)
+    return {"authenticated": False}
 
 
 @app.post("/parse-link")
@@ -134,7 +287,6 @@ def parse_link(request: ParseLinkRequest) -> dict[str, object]:
 @app.post("/analyze", response_model=AnalyzeResponse, status_code=202)
 def submit_analysis(
     request: AnalyzeRequest,
-    background_tasks: BackgroundTasks,
     x_client_id: str | None = Header(default=None, description="客户端身份标识（浏览器持久化 UUID）"),
 ) -> AnalyzeResponse:
     if not request.client_id:
@@ -149,7 +301,7 @@ def submit_analysis(
         if not request.label and parsed.label:
             request.label = parsed.label
     task = task_store.create(request)
-    background_tasks.add_task(run_analysis_task, task.task_id, request, task_store)
+    task_queue.submit(task.task_id, task_store, run_analysis_task, task.task_id, request, task_store)
     return AnalyzeResponse(
         task_id=task.task_id,
         status=task.status,
@@ -159,7 +311,6 @@ def submit_analysis(
 
 @app.post("/analyze-file", response_model=AnalyzeResponse, status_code=202)
 def submit_file_analysis(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     mode: AnalysisMode = Form(AnalysisMode.summary),
     use_mock: bool | None = Form(None),
@@ -180,8 +331,16 @@ def submit_file_analysis(
         llm_api_key=llm_api_key,
     )
     task = task_store.create(request)
-    media_path = _save_upload(file, task.task_id)
-    background_tasks.add_task(run_file_analysis_task, task.task_id, request, media_path, task_store)
+    try:
+        media_path = _save_upload(file, task.task_id)
+    except BaseException:
+        # 上传失败不能留下一条永远停在 queued 的僵尸记录（此前会留）。
+        task_store.delete(task.task_id)
+        remove_task_artifacts(settings, task.task_id)
+        raise
+    task_queue.submit(
+        task.task_id, task_store, run_file_analysis_task, task.task_id, request, media_path, task_store
+    )
     return AnalyzeResponse(
         task_id=task.task_id,
         status=task.status,
@@ -271,6 +430,19 @@ def get_task(
     task = _owned_task(task_id, _client_id_from_header(x_client_id))
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
+    # 运行中且存在实时追踪时，把真实进度/阶段/ETA 填入响应（Mock 或追踪缺失则留空）。
+    if task.status == TaskStatus.running:
+        snap = get_snapshot(task_id, settings.results_dir)
+        if snap is not None:
+            task.progress = snap["progress"]
+            task.stage = snap["stage"]
+            task.eta_seconds = snap["eta_seconds"]
+            task.media_duration_seconds = snap["media_duration"]
+            task.transcribe_done = snap["transcribe_done"]
+            task.transcribe_total = snap["transcribe_total"]
+            task.transcribe_seconds = snap["transcribe_seconds"]
+            task.elapsed_seconds = snap["elapsed_seconds"]
+            task.estimated_total_seconds = snap["estimated_total_seconds"]
     return task
 
 
@@ -349,16 +521,12 @@ def _chat_metadata(result: AnalysisResult) -> dict[str, str]:
 
 
 def _remove_task_files(task_id: str) -> None:
-    result_file = settings.results_dir / f"{task_id}.json"
-    if result_file.exists():
-        try:
-            result_file.unlink()
-        except OSError:
-            # 沙箱/无回收站环境下物理删除可能被安全策略拦截，忽略即可，不影响记录清理。
-            pass
-    for directory in (settings.tmp_dir / task_id, settings.media_dir / task_id):
-        if directory.exists():
-            shutil.rmtree(directory, ignore_errors=True)
+    """删除任务的全部磁盘产物（结果 JSON、临时目录、媒体目录）。
+
+    真正的清理逻辑在 cleanup.remove_task_artifacts —— 让删除接口和保留期回收
+    共用同一份"什么算产物"的定义，避免两处规则漂移。
+    """
+    remove_task_artifacts(settings, task_id)
 
 
 @app.get("/tasks/{task_id}/media")
@@ -435,10 +603,32 @@ def _ensure_source_video(task: TaskRecord, stored: Path) -> Path:
 
 
 def _save_upload(file: UploadFile, task_id: str) -> Path:
+    """把上传文件落到 media/<task_id>/，超过上限立即中止并删掉半成品。
+
+    必须边写边计数：Content-Length 由客户端提供、不可信，而"先整份落盘再判断
+    大小"等于让一个请求写满磁盘。上传端点没有鉴权，这是唯一的守门人。
+    """
     original_name = Path(file.filename or "uploaded-media").name
+    max_bytes = settings.max_upload_mb * 1024 * 1024
     target_dir = settings.media_dir / task_id
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / original_name
-    with target.open("wb") as output:
-        shutil.copyfileobj(file.file, output)
+    written = 0
+    try:
+        with target.open("wb") as output:
+            while chunk := file.file.read(UPLOAD_CHUNK_BYTES):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"文件超过 {settings.max_upload_mb} MB 上限，请裁剪后再上传。",
+                    )
+                output.write(chunk)
+    except BaseException:
+        # 含 HTTPException 与客户端中途断开；半成品一律不留。
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return target

@@ -217,9 +217,12 @@ def test_fetch_item_without_router_data_raises(cookies_env, monkeypatch, tmp_pat
 
 def test_download_audio_full_flow(cookies_env, monkeypatch, tmp_path: Path) -> None:
     _patch_share_page(monkeypatch, _share_item())
-    play_url = DouyinShareDownloader.PLAY_URL.format(uri="v0d00fg10000da9afifog65s10jv8vk0")
-    _patch_stream(monkeypatch, {play_url: [_big_bytes(), b"tail"]})
     downloader = DouyinShareDownloader(tmp_path / "tmp")
+    # 转写默认取低画质（只要音轨），URL 里应是 _audio_ratio() 而非原画质。
+    play_url = DouyinShareDownloader.PLAY_URL.format(
+        uri="v0d00fg10000da9afifog65s10jv8vk0", ratio=downloader._audio_ratio()
+    )
+    _patch_stream(monkeypatch, {play_url: [_big_bytes(), b"tail"]})
 
     media = downloader.download_audio(f"https://www.douyin.com/video/{VIDEO_ID}", "task1")
 
@@ -244,17 +247,22 @@ def test_download_audio_without_play_addr_raises(cookies_env, monkeypatch, tmp_p
 
 def test_download_mp4_falls_back_to_url_list(cookies_env, monkeypatch, tmp_path: Path) -> None:
     _patch_share_page(monkeypatch, _share_item())
-    play_url = DouyinShareDownloader.PLAY_URL.format(uri="v0d00fg10000da9afifog65s10jv8vk0")
-    fallback_url = "https://aweme.snssdk.com/aweme/v1/playwm/?video_id=fallback"
+    downloader = DouyinShareDownloader(tmp_path / "tmp")
+    low_url = DouyinShareDownloader.PLAY_URL.format(
+        uri="v0d00fg10000da9afifog65s10jv8vk0", ratio=downloader._audio_ratio()
+    )
+    high_url = DouyinShareDownloader.PLAY_URL.format(
+        uri="v0d00fg10000da9afifog65s10jv8vk0", ratio=DouyinShareDownloader.DEFAULT_VIDEO_RATIO
+    )
 
     def flaky_stream(method: str, url: str, **kwargs):
-        if url == play_url:
+        # 两个画质直链都失败时，才回退到 url_list（带水印直链）
+        if url in (low_url, high_url):
             raise downloader_module.httpx.ConnectError("simulated CDN failure")
         return FakeStreamContext(FakeStreamResponse([_big_bytes()]))
 
     monkeypatch.setattr(downloader_module.httpx, "stream", flaky_stream)
     monkeypatch.setattr(downloader_module, "sleep", lambda seconds: None)
-    downloader = DouyinShareDownloader(tmp_path / "tmp")
 
     media = downloader.download_audio(f"https://www.douyin.com/video/{VIDEO_ID}", "task1")
 
@@ -277,6 +285,12 @@ def test_download_mp4_rejects_tiny_response(cookies_env, monkeypatch, tmp_path: 
 
 
 def test_download_video_reuses_existing_audio_file(cookies_env, monkeypatch, tmp_path: Path) -> None:
+    # 只有当「转写下载的画质」就是原画质时才能复用（否则会把降质版当源视频）。
+    monkeypatch.setattr(
+        DouyinShareDownloader,
+        "_audio_ratio",
+        lambda self: DouyinShareDownloader.DEFAULT_VIDEO_RATIO,
+    )
     tmp_dir = tmp_path / "tmp"
     task_dir = tmp_dir / "task1"
     task_dir.mkdir(parents=True)
@@ -300,11 +314,37 @@ def test_download_video_reuses_existing_audio_file(cookies_env, monkeypatch, tmp
 
 def test_download_video_downloads_when_missing(cookies_env, monkeypatch, tmp_path: Path) -> None:
     _patch_share_page(monkeypatch, _share_item())
-    play_url = DouyinShareDownloader.PLAY_URL.format(uri="v0d00fg10000da9afifog65s10jv8vk0")
+    play_url = DouyinShareDownloader.PLAY_URL.format(
+        uri="v0d00fg10000da9afifog65s10jv8vk0",
+        ratio=DouyinShareDownloader.DEFAULT_VIDEO_RATIO,
+    )
     _patch_stream(monkeypatch, {play_url: [_big_bytes()]})
     downloader = DouyinShareDownloader(tmp_path / "tmp")
 
     video_path = downloader.download_video(f"https://www.douyin.com/video/{VIDEO_ID}", "task2")
+
+    assert video_path.name == f"{VIDEO_ID}.video.mp4"
+    assert video_path.stat().st_size >= 10_000
+
+
+def test_download_video_does_not_reuse_downgraded_audio(cookies_env, monkeypatch, tmp_path: Path) -> None:
+    """转写默认下低画质，源视频必须重新下原画质，不能把降质版当成源视频。"""
+    tmp_dir = tmp_path / "tmp"
+    task_dir = tmp_dir / "task3"
+    task_dir.mkdir(parents=True)
+    (task_dir / f"douyin-{VIDEO_ID}.mp4").write_bytes(_big_bytes())
+
+    _patch_share_page(monkeypatch, _share_item())
+    high_url = DouyinShareDownloader.PLAY_URL.format(
+        uri="v0d00fg10000da9afifog65s10jv8vk0",
+        ratio=DouyinShareDownloader.DEFAULT_VIDEO_RATIO,
+    )
+    _patch_stream(monkeypatch, {high_url: [_big_bytes()]})
+    monkeypatch.setattr(downloader_module, "sleep", lambda seconds: None)
+
+    video_path = DouyinShareDownloader(tmp_dir).download_video(
+        f"https://www.douyin.com/video/{VIDEO_ID}", "task3"
+    )
 
     assert video_path.name == f"{VIDEO_ID}.video.mp4"
     assert video_path.stat().st_size >= 10_000

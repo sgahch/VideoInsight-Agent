@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Tests](https://img.shields.io/badge/tests-131%20passed-2EA44F?style=flat-square&logo=pytest&logoColor=white)](./tests)
+[![Tests](https://img.shields.io/badge/tests-178%20passed-2EA44F?style=flat-square&logo=pytest&logoColor=white)](./tests)
 [![ASR](https://img.shields.io/badge/ASR-DashScope%20Paraformer-FF6A00?style=flat-square)](https://dashscope.aliyuncs.com/)
 
 </div>
@@ -24,6 +24,7 @@
 | 🤖 | **AI 追问** | 针对已完成的任务继续提问，模型只依据该视频的转写稿作答 |
 | 📤 | **本地上传** | 拖进音频/视频文件即可分析，绕开一切平台风控 |
 | 🗂️ | **历史与隔离** | 任务持久化在 SQLite，按浏览器身份隔离，重启不丢、互不串号 |
+| 🔑 | **访问鉴权** | 可选的共享令牌（中间件默认拒绝 + 白名单），保护上传、Cookies 抓取与全部任务数据 |
 | 🎨 | **沉浸式前端** | 结果四视图、媒体在线播放与下载、深浅色主题切换 |
 
 ---
@@ -139,6 +140,11 @@ curl -X POST http://127.0.0.1:8000/tasks/<task_id>/chat `
 | `GET` | `/cookies/status` | 查看 Cookies 状态 |
 | `POST` | `/cookies/qr/start` | 扫码登录 |
 | `POST` | `/cookies/browser/*` | 专用浏览器窗口抓取登录态 |
+| `GET` | `/health` | 探活（含是否启用鉴权） |
+| `POST` | `/auth/session` | 用访问令牌换取鉴权 Cookie |
+
+> 除 `/`、`/static/*`、`/health`、`/auth/session` 外，**设置 `VIDEOINSIGHT_AUTH_TOKEN`
+> 后所有端点都需要令牌**；不设置则全部开放。
 
 <details>
 <summary><b>历史记录与删除</b></summary>
@@ -152,6 +158,43 @@ curl -X DELETE http://127.0.0.1:8000/tasks/<task_id>
 ```
 
 历史列表按浏览器生成的 `client_id` 隔离（请求头 `X-Client-Id`），看不到别人的任务。
+
+> **归属规则（严格匹配）**：请求身份必须与任务归属完全一致，否则一律 404。
+> 不带 `X-Client-Id` 提交的任务归属为"无身份"，只能被同样不带身份的请求看到 ——
+> 它既不会对带身份的客户端开放，也不会从历史列表里消失。
+>
+> ⚠️ `client_id` 是浏览器自造的 UUID，**是隔离约定，不是身份认证**：它只防止
+> 前端串号，任何人都能伪造一个。真正的访问控制见下方「访问鉴权」。
+
+</details>
+
+<details>
+<summary><b>访问鉴权（可选）</b></summary>
+
+默认**不启用**，行为与之前完全一致。设置 `VIDEOINSIGHT_AUTH_TOKEN` 后，除公开路径
+（`/`、`/static/*`、`/health`、`/auth/session`）外的**所有**请求都必须携带令牌：
+
+```powershell
+# 方式一：Bearer（脚本 / curl / 第三方集成）
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8000/tasks
+# 方式二：专用头
+curl -H "X-Auth-Token: <token>" http://127.0.0.1:8000/tasks
+```
+
+Web 界面在「访问令牌」面板填入令牌，验证通过后自动记住。
+
+> **为什么还有 Cookie 这条路**：媒体预览和下载是浏览器通过 `<video src>` /
+> `<a href>` 发起的**原生请求**，这类请求带不了自定义请求头。前端因此调用
+> `POST /auth/session` 把令牌换成 HttpOnly Cookie —— 少了这条通道，开启鉴权
+> 会直接打断媒体播放和下载。`/docs` 同理：Swagger UI 由浏览器发起同源请求，
+> 会自动带上 Cookie，所以鉴权后它是完整可用的。
+
+设计取舍：用中间件而不是逐个路由加依赖 —— 路由会越加越多，漏掉一个就是一个
+洞；中间件按"默认拒绝 + 公开白名单"工作，新路由自动受保护。令牌比较使用
+`secrets.compare_digest`，避免计时侧信道。
+
+> ⚠️ 这是**单个共享密钥**：没有账号体系、没有权限粒度，也不负责 TLS。适合
+> 反向代理之后或私有网络内的部署；直接裸奔在公网上仍需自行加一层认证与限流。
 
 </details>
 
@@ -189,6 +232,54 @@ curl -o output.mp4 "http://127.0.0.1:8000/tasks/<task_id>/video?download=1"
 
 ---
 
+## 🧹 产物回收
+
+**数据库是唯一事实来源**：任务产物放在以 `task_id` 命名的目录里，所以
+「目录存在、库里没有记录」= 纯垃圾。服务启动时对账一次，之后每
+`VIDEOINSIGHT_CLEANUP_INTERVAL_HOURS` 小时再来一次，回收三类东西：
+
+| 回收对象 | 说明 |
+|---|---|
+| 孤儿任务目录 | 删除任务时清理失败、或进程被中断留下的残渣 |
+| 终态任务的转写中间 WAV | ASR 的内部输入，转写完无人再读；一小时音频约 **115 MB** |
+| 过期任务记录 | 仅当 `VIDEOINSIGHT_TASK_RETENTION_HOURS > 0`（默认关闭） |
+
+三条安全边界：
+
+- 只处理名字**严格等于** 32 位十六进制 `task_id` 的目录 —— 手工造的 `tmp/realtest/` 之类不会被误删。
+- 下划线开头的条目**永不触碰** —— `media/_cookies`（登录态）与 `media/_browser_profiles`（专用浏览器配置）是用户资产，不是产物。
+- 中间产物只清理 **`succeeded` / `failed`** 的任务，且按 `task_id` 前缀精确匹配 —— 正在跑的任务，以及用户上传的、恰好叫 `*-16k.wav` 的源文件，都不会被删。
+
+> 回收是尽力而为的：任何失败只记日志，绝不影响服务启动。
+
+---
+
+## 🧵 并发与重启对账
+
+长任务不再挂在 FastAPI 的 `BackgroundTasks` 上，而是走**专用的有界线程池**
+（`VIDEOINSIGHT_MAX_CONCURRENT_TASKS`，默认 2）。
+
+**为什么要换**，原来的做法有三个问题：
+
+1. `BackgroundTasks` 把同步任务丢进 anyio 的默认线程池，而**所有同步端点共用
+   同一个池**（默认 40 个工人）。一个视频任务动辄十几分钟，几个并发就能把池子
+   占满，连 `GET /tasks` 都不再响应。
+2. 没有并发上限：N 次提交 = N 路同时下载 + 转写，打满带宽、磁盘和 ASR 配额。
+3. 进程重启后，库里停在 `queued` / `running` 的任务永远没人管 —— 既跑不完也
+   不失败，只会作为僵尸记录一直躺在历史列表里。
+
+前两条由专用有界池解决（业务是 IO 与子进程密集型，GIL 不是瓶颈），第三条靠
+**启动对账**：
+
+| 遗留状态 | 处理 | 理由 |
+|---|---|---|
+| `running` | 标记失败 | 进程死了任务必然被中断，而链路**没有断点续传** —— 磁盘上的半成品不可信。让用户明确重试，比伪装成"还在跑"诚实 |
+| `queued` | 重新入队 | 从未开始，没有部分状态，提交意图明确。上传型任务需要原始文件还在，否则只能失败并说明原因 |
+
+一个副作用值得知道：`POST /analyze` 现在**立即返回**，不再等任务跑完才回响应。客户端必须轮询 `/tasks/{id}` 拿结果（前端本来就是这么做的）。
+
+---
+
 ## ⚙️ 切换真实链路
 
 1. 安装系统 `ffmpeg` 并加入 PATH（没装则回退到 `imageio-ffmpeg` 内置二进制）。
@@ -217,9 +308,14 @@ LLM_MODEL=deepseek-chat
 | `VIDEOINSIGHT_RESULTS_DIR` | `data/results` | 结果落盘目录 |
 | `VIDEOINSIGHT_MEDIA_DIR` | `media` | 媒体与 Cookies 目录 |
 | `VIDEOINSIGHT_DB_PATH` | `data/videoinsight.db` | SQLite 路径 |
-| `DASHSCOPE_ASR_CHUNK_THRESHOLD_SECONDS` | `900` | 超过该时长开始切片 |
-| `DASHSCOPE_ASR_CHUNK_SECONDS` | `600` | 每片时长 |
-| `DASHSCOPE_ASR_MAX_WORKERS` | `3` | 并发转写路数 |
+| `VIDEOINSIGHT_MAX_UPLOAD_MB` | `2048` | 单个上传文件大小上限 |
+| `VIDEOINSIGHT_AUTH_TOKEN` | — | 共享访问令牌；**不设置则不鉴权**，设置后所有非公开端点都要带令牌 |
+| `VIDEOINSIGHT_MAX_CONCURRENT_TASKS` | `2` | 同时执行的长任务上限 |
+| `VIDEOINSIGHT_CLEANUP_INTERVAL_HOURS` | `6` | 产物回收周期；`<=0` 只保留启动时那一次 |
+| `VIDEOINSIGHT_TASK_RETENTION_HOURS` | `0` | 任务记录保留时长；`0` = 永久保留历史，只回收孤儿文件 |
+| `DASHSCOPE_ASR_CHUNK_THRESHOLD_SECONDS` | `120` | 超过该时长开始并发切片；短音频也能避开单次请求固定开销 |
+| `DASHSCOPE_ASR_CHUNK_SECONDS` | `120` | 每片时长 |
+| `DASHSCOPE_ASR_MAX_WORKERS` | `8` | 并发转写路数；过高可能触发服务商限流 |
 | `YTDLP_COOKIES_FROM_BROWSER` | — | 复用本机浏览器 Cookies，如 `chrome` / `edge` |
 | `YTDLP_COOKIES_FILE` | — | Netscape 格式 `cookies.txt` 路径 |
 | `MEDIA_CRAWLER_OUTPUT_DIR` | — | MediaCrawler 评论落盘目录 |
@@ -294,9 +390,12 @@ app/
     asr.py                 Mock / Paraformer 转写（长音频切片并发）
     llm.py                 Mock / OpenAI-compatible LLM
     comment_fetcher.py     观众评论（抖音直连 + MediaCrawler 对接）
+  task_queue.py            长任务的有界线程池与重启对账
+  cleanup.py               产物回收（孤儿目录 / 中间文件 / 过期记录）
+  security.py              可选的共享令牌鉴权中间件
 web/
   index.html / app.js / styles.css   前端页面
-tests/                               测试用例（131 passed）
+tests/                               测试用例（178 passed）
 verify_real_chain.py                 真实链路验证脚本
 verify_kuaishou_video.py             快手全流程调试脚本
 verify_comments_chain.py             评论链路验证脚本（mock 转写 + 真实评论接口）
@@ -312,16 +411,26 @@ pip install pytest
 pytest --basetemp=_pytest_tmp -q
 ```
 
-当前 **131 passed / 0 failed**，覆盖下载器路由、评论解析、ASR 切片容错、任务隔离、链接解析与 LLM 适配。
+当前 **178 passed / 0 failed**，覆盖下载器路由、评论解析、ASR 切片容错、任务归属隔离、
+链接解析、LLM 适配，ffmpeg / yt-dlp 的超时兜底，上传限额，产物回收的全部安全边界
+（不碰登录态资产、不碰在跑任务、不碰用户源文件），以及并发闸门与重启对账、
+访问鉴权的"默认不启用 / 启用后逐个入口都拦得住"。
+
+> 长任务改为异步执行后，`POST` 不再等任务跑完才返回，测试改用轮询（`tests/conftest.py`
+> 的 `wait_for_task`）来断言终态 —— 这比原来的"提交完立刻断言 succeeded"更贴近真实契约。
 
 ---
 
 ## 🗺️ 边界与后续
 
 **已完成**：API 提交/查询/列表/删除、文件上传分析、抖音免签名下载、观众评论抓取、AI 追问、
-Mock 全链路闭环、可替换的下载/ASR/LLM 模块、SQLite 持久化、沉浸式 Web 前端。
+Mock 全链路闭环、可替换的下载/ASR/LLM 模块、SQLite 持久化、沉浸式 Web 前端、
+有界并发与重启对账、产物自动回收、可选的共享令牌鉴权。
 
-**暂不包含**：Celery + Redis 异步队列、飞书机器人、PostgreSQL、内容安全与事实核查、多模态画面分析。
+**暂不包含**：速率限制与账号体系（鉴权是单个共享密钥，没有权限粒度）、
+Celery + Redis 分布式队列（长任务目前走进程内线程池，单机可用但无法横向扩展、
+任务也不跨进程调度）、TLS 终止、飞书机器人、PostgreSQL、内容安全与事实核查、
+多模态画面分析。
 
 ---
 

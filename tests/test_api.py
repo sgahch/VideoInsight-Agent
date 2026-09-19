@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.main import app
 
+from conftest import wait_for_task
+
 
 def test_health() -> None:
     client = TestClient(app)
@@ -48,9 +50,7 @@ def test_submit_analysis_runs_background_task() -> None:
     assert response.status_code == 202
     task_id = response.json()["task_id"]
 
-    task_response = client.get(f"/tasks/{task_id}")
-    assert task_response.status_code == 200
-    body = task_response.json()
+    body = wait_for_task(client, task_id)
     assert body["status"] == "succeeded"
     assert "视频总结" in body["result"]["output"]
 
@@ -64,6 +64,7 @@ def test_list_and_delete_tasks(monkeypatch, tmp_path) -> None:
     client = TestClient(app)
     headers = {"X-Client-Id": "client-A"}
 
+    task_ids = []
     for url in ("https://example.com/a", "https://example.com/b"):
         response = client.post(
             "/analyze",
@@ -71,6 +72,11 @@ def test_list_and_delete_tasks(monkeypatch, tmp_path) -> None:
             headers=headers,
         )
         assert response.status_code == 202
+        task_ids.append(response.json()["task_id"])
+
+    # 任务由专用线程池异步执行，等它们跑完再断言状态过滤
+    for task_id in task_ids:
+        wait_for_task(client, task_id, headers=headers)
 
     listing = client.get("/tasks", headers=headers).json()
     assert len(listing) == 2
@@ -89,7 +95,7 @@ def test_list_and_delete_tasks(monkeypatch, tmp_path) -> None:
 
 
 def test_list_tasks_isolates_clients(monkeypatch, tmp_path) -> None:
-    """未带身份标识或身份不同，都看不到他人任务（历史记录隔离）。"""
+    """历史记录隔离：无身份或身份不同，都看不到他人任务。"""
     from app.task_store import SQLiteTaskStore
 
     store = SQLiteTaskStore(tmp_path / "tasks.db")
@@ -102,9 +108,66 @@ def test_list_tasks_isolates_clients(monkeypatch, tmp_path) -> None:
         headers={"X-Client-Id": "client-A"},
     )
 
-    assert client.get("/tasks").json() == []  # 无身份 → 空
+    # 该库中没有无归属任务，所以无身份调用方看到的是空的无身份命名空间
+    assert client.get("/tasks").json() == []
     assert client.get("/tasks", headers={"X-Client-Id": "client-B"}).json() == []  # 他人 → 空
     assert len(client.get("/tasks", headers={"X-Client-Id": "client-A"}).json()) == 1
+
+
+def test_analyze_without_client_id_is_listable_anonymously(monkeypatch, tmp_path) -> None:
+    """回归：不带身份提交的任务，必须能被不带身份的调用方在历史里看到。
+
+    此前 create() 允许 client_id=None，而 list_tasks(client_id=None) 无条件
+    返回 []，两者不对称：这类任务创建成功（202）、按 id 也能查到，却永远出现
+    在历史列表里 —— 对 CLI / curl / 第三方集成来说就是个数据黑洞。
+    """
+    from app.task_store import SQLiteTaskStore
+
+    store = SQLiteTaskStore(tmp_path / "tasks.db")
+    monkeypatch.setattr(main_module, "task_store", store)
+    client = TestClient(app)
+
+    response = client.post(
+        "/analyze",
+        json={"url": "https://example.com/a", "mode": "summary", "use_mock": True},
+    )
+    assert response.status_code == 202
+    task_id = response.json()["task_id"]
+
+    assert [task["task_id"] for task in client.get("/tasks").json()] == [task_id]
+    assert client.get(f"/tasks/{task_id}").status_code == 200
+
+
+def test_unowned_task_is_not_reachable_by_identified_client(monkeypatch, tmp_path) -> None:
+    """回归：无归属任务不得对「带身份」的调用方开放。
+
+    此前 _owned_task 写作 `if task.request.client_id and task.request.client_id
+    != client_id`，无归属任务会短路放行 —— 任何带 X-Client-Id 的调用方都能读取、
+    删除它，还能对它发起 /chat 来消耗服务端 LLM 额度。
+    """
+    from app.schemas import AnalysisMode, AnalyzeRequest
+    from app.task_store import SQLiteTaskStore
+
+    store = SQLiteTaskStore(tmp_path / "tasks.db")
+    monkeypatch.setattr(main_module, "task_store", store)
+    client = TestClient(app)
+
+    task = store.create(
+        AnalyzeRequest(url="https://example.com/a", mode=AnalysisMode.summary, use_mock=True)
+    )
+    attacker = {"X-Client-Id": "attacker"}
+
+    assert client.get(f"/tasks/{task.task_id}", headers=attacker).status_code == 404
+    assert client.delete(f"/tasks/{task.task_id}", headers=attacker).status_code == 404
+    assert (
+        client.post(
+            f"/tasks/{task.task_id}/chat", json={"question": "讲了个啥"}, headers=attacker
+        ).status_code
+        == 404
+    )
+
+    # 无身份调用方仍可访问无归属任务：NULL 归属自成一个命名空间，而不是"公开"
+    assert client.get(f"/tasks/{task.task_id}").status_code == 200
 
 
 def test_delete_missing_task_returns_404(monkeypatch, tmp_path) -> None:

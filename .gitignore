@@ -21,3 +21,14 @@ media/
 .workbuddy/
 _smoke_*.py
 _verify_*.py
+
+# 登录凭证：抖音/各平台 Cookies 一律不入库（泄露即等于账号失陷）
+cookies.txt
+cookies*.txt
+*cookies*.txt
+.cookies/
+config/cookies.txt
+
+# data/ 下除目录本身外，其余为运行产物与个人笔记，默认不入库
+data/*.md
+data/*.log

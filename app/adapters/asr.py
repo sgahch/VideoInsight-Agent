@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import logging
+import struct
+import subprocess
+import threading
 import wave
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from pathlib import Path
+from time import sleep
 
-from app.adapters.audio import FfmpegAudioPreprocessor
+from app.adapters.audio import (
+    FfmpegAudioPreprocessor,
+    audio_duration,
+    resolve_ffmpeg,
+)
 from app.config import Settings
 from app.errors import ExternalDependencyError, WorkflowError
 from app.schemas import TranscriptSegment
@@ -16,7 +24,16 @@ LOGGER = logging.getLogger(__name__)
 
 
 class MockTranscriber:
-    def transcribe(self, audio_path: Path | None, task_id: str) -> list[TranscriptSegment]:
+    def __init__(self) -> None:
+        # 与 MockDownloader 返回的时长保持一致，便于量化演示。
+        self.last_duration: float | None = 180.0
+
+    def transcribe(
+        self,
+        audio_path: Path | None,
+        task_id: str,
+        reporter: object | None = None,
+    ) -> list[TranscriptSegment]:
         return [
             TranscriptSegment(start=0, end=18, text="大家好，今天分享一次 AI 产品经理岗位的面试经验。"),
             TranscriptSegment(start=18, end=56, text="面试官先问了项目背景，我介绍了视频分析助手从链接解析、语音转写到结构化总结的流程。"),
@@ -30,8 +47,17 @@ class ParaformerTranscriber:
     def __init__(self, settings: Settings, preprocessor: FfmpegAudioPreprocessor | None = None) -> None:
         self.settings = settings
         self.preprocessor = preprocessor or FfmpegAudioPreprocessor()
+        # 最近一次转写实测到的音频时长（秒）；供 workflow 记录「视频总时长」。
+        self.last_duration: float | None = None
+        # 当前转写任务 id（供分片进度回调回传，避免层层透传参数）。
+        self._current_task_id: str | None = None
 
-    def transcribe(self, audio_path: Path | None, task_id: str) -> list[TranscriptSegment]:
+    def transcribe(
+        self,
+        audio_path: Path | None,
+        task_id: str,
+        reporter: object | None = None,
+    ) -> list[TranscriptSegment]:
         if audio_path is None:
             raise WorkflowError("ASR 需要音频文件，但下载模块未返回音频路径。")
         if not self.settings.dashscope_api_key:
@@ -49,24 +75,46 @@ class ParaformerTranscriber:
                 f"wss://{self.settings.dashscope_workspace_id}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference"
             )
 
+        chunk_seconds = max(1, self.settings.dashscope_asr_chunk_seconds)
+        threshold = max(1, self.settings.dashscope_asr_chunk_threshold_seconds)
+        max_workers = max(1, self.settings.dashscope_asr_max_workers)
+
+        # 优先用 ffprobe 直接拿时长，决定要不要走长音频分片。没有 ffprobe 时
+        # 拿不到时长，统一回退到「整文件转码后测量」的旧路径，行为与原实现一致。
+        duration = audio_duration(audio_path)
+        self.last_duration = duration
+
+        if duration is None:
+            return self._transcribe_legacy(audio_path, task_id, Recognition, reporter)
+
+        if duration >= threshold and chunk_seconds > 0 and max_workers > 1:
+            if reporter is not None:
+                reporter.mark_transcribe_started(
+                    duration,
+                    max(1, (int(duration) + chunk_seconds - 1) // chunk_seconds),
+                )
+            # 快路径：ffmpeg 边解码边把分片送去识别，使「解码」与「上传+识别」
+            # 并发进行（之前是整段切完再统一识别，解码时间是纯串行浪费）。
+            try:
+                return self._transcribe_concurrent(
+                    audio_path, task_id, Recognition, chunk_seconds, reporter
+                )
+            except WorkflowError as exc:
+                LOGGER.warning("ffmpeg 并发分片识别失败，回退整文件转码方案：%s", exc)
+                return self._transcribe_legacy(audio_path, task_id, Recognition, reporter)
+
+        # 短音频：整文件转码后单次识别（无分片，进度直接标记 1/1）。
+        if reporter is not None:
+            reporter.mark_transcribe_started(duration, 1)
         wav_path = audio_path.parent / f"{task_id}-16k.wav"
         self.preprocessor.convert_to_wav16k(audio_path, wav_path)
-
-        duration = _wav_duration(wav_path)
-        if (
-            duration is not None
-            and duration >= max(1, self.settings.dashscope_asr_chunk_threshold_seconds)
-            and self.settings.dashscope_asr_chunk_seconds > 0
-            and self.settings.dashscope_asr_max_workers > 1
-        ):
-            return self._transcribe_long_wav(
-                wav_path,
-                task_id,
-                Recognition,
-                duration,
-            )
-
-        return self._recognize_file(wav_path, Recognition)
+        try:
+            segments = self._recognize_file(wav_path, Recognition)
+        finally:
+            _best_effort_unlink(wav_path)
+        if reporter is not None:
+            reporter.on_transcribe_chunk(1, 1)
+        return segments
 
     def _recognize_file(self, wav_path: Path, recognition_class: object) -> list[TranscriptSegment]:
         recognition = recognition_class(
@@ -76,51 +124,195 @@ class ParaformerTranscriber:
             language_hints=["zh", "en"],
             callback=None,
         )
-        result = recognition.call(str(wav_path))
-        if result.status_code != HTTPStatus.OK:
-            raise WorkflowError(f"ASR 识别失败：{result.message}")
-        return _result_to_segments(result)
+        last_error: Exception | None = None
+        # 并发调高后可能撞 DashScope 限流（429/503），退避后重试，避免整段转写白做。
+        for attempt in range(3):
+            result = recognition.call(str(wav_path))
+            if result.status_code == HTTPStatus.OK:
+                return _result_to_segments(result)
+            last_error = WorkflowError(f"ASR 识别失败：{result.message}")
+            if attempt < 2:
+                sleep(1.0 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
 
-    def _transcribe_long_wav(
+    def _recognize_chunk(
         self,
-        wav_path: Path,
+        index: int,
+        path: Path,
+        chunk_seconds: int,
+        recognition_class: object,
+    ) -> tuple[int, list[TranscriptSegment]]:
+        local_segments = self._recognize_file(path, recognition_class)
+        offset = index * chunk_seconds
+        return index, [
+            segment.model_copy(
+                update={"start": segment.start + offset, "end": segment.end + offset}
+            )
+            for segment in local_segments
+        ]
+
+    def _transcribe_concurrent(
+        self,
+        audio_path: Path,
         task_id: str,
         recognition_class: object,
-        duration: float,
+        chunk_seconds: int,
+        reporter: object | None = None,
     ) -> list[TranscriptSegment]:
-        chunk_seconds = max(1, self.settings.dashscope_asr_chunk_seconds)
-        chunk_paths = _split_wav(wav_path, task_id, chunk_seconds, duration)
-        workers = min(max(1, self.settings.dashscope_asr_max_workers), len(chunk_paths))
-
+        """ffmpeg 把源音频解码成 raw PCM 流，主线程边读边按 chunk_seconds 写分片
+        WAV 并立即提交识别线程——解码（子进程）与上传+识别（线程池）真正重叠，
+        消除「先整段切完再统一识别」的串行等待。分片仍落盘是为了兼容 DashScope
+        文件接口（非流式）。
+        """
+        ffmpeg = resolve_ffmpeg()
+        cmd = [ffmpeg, "-i", str(audio_path), "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
         try:
-            def recognize_chunk(item: tuple[int, Path]) -> tuple[int, list[TranscriptSegment]]:
-                index, path = item
-                local_segments = self._recognize_file(path, recognition_class)
-                offset = index * chunk_seconds
-                return index, [
-                    segment.model_copy(
-                        update={
-                            "start": segment.start + offset,
-                            "end": segment.end + offset,
-                        }
-                    )
-                    for segment in local_segments
-                ]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as exc:
+            raise WorkflowError(f"ffmpeg 启动失败：{exc}")
 
-            results: list[tuple[int, list[TranscriptSegment]]] = []
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = [executor.submit(recognize_chunk, item) for item in enumerate(chunk_paths)]
-                for future in futures:
-                    results.append(future.result())
+        stderr_chunks: list[bytes] = []
+        stop = threading.Event()
 
-            segments = [segment for _, chunk in sorted(results) for segment in chunk]
-            segments.sort(key=lambda segment: (segment.start, segment.end))
-            return segments
+        def _drain_stderr() -> None:
+            try:
+                while not stop.is_set():
+                    chunk = proc.stderr.read(4096)
+                    if not chunk:
+                        break
+                    stderr_chunks.append(chunk)
+            except Exception:  # noqa: BLE001 - 避免管道读取异常阻断主流程
+                pass
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        workers = max(1, self.settings.dashscope_asr_max_workers)
+        executor = ThreadPoolExecutor(max_workers=workers)
+        chunk_paths: list[Path] = []
+        futures = []
+        index = 0
+        try:
+            chunk_bytes = chunk_seconds * 16000 * 2
+            while True:
+                data = proc.stdout.read(chunk_bytes)
+                if not data:
+                    break
+                chunk_path = audio_path.parent / f"{task_id}-asr-{index:04d}.wav"
+                _write_wav16k(chunk_path, data)
+                chunk_paths.append(chunk_path)
+                futures.append(
+                    executor.submit(self._recognize_chunk, index, chunk_path, chunk_seconds, recognition_class)
+                )
+                index += 1
         finally:
-            # 分片已在并发识别中全部消费完；清理是收尾动作，绝不能反过来
-            # 毁掉已经成功的转写（Windows 上文件被占用/只读目录都会抛异常）。
+            try:
+                proc.stdout.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if proc.poll() is None:
+                    proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+            stop.set()
+            stderr_thread.join(timeout=2)
+
+        if not chunk_paths and proc.returncode not in (0, None):
+            detail = b"".join(stderr_chunks).decode("utf-8", "replace").strip() or "unknown ffmpeg error"
+            raise WorkflowError(f"ffmpeg 解码失败：{detail}")
+
+        results: list[tuple[int, list[TranscriptSegment]]] = []
+        total = (
+            (int(self.last_duration) + chunk_seconds - 1) // chunk_seconds
+            if self.last_duration
+            else max(1, len(futures))
+        )
+        try:
+            done = 0
+            for future in as_completed(futures):
+                results.append(future.result())
+                done += 1
+                if reporter is not None:
+                    reporter.on_transcribe_chunk(done, total)
+        finally:
+            executor.shutdown(wait=False)
             for chunk_path in chunk_paths:
                 _best_effort_unlink(chunk_path)
+
+        segments = [segment for _, chunk in sorted(results) for segment in chunk]
+        segments.sort(key=lambda segment: (segment.start, segment.end))
+        return segments
+
+    def _transcribe_chunks(
+        self,
+        chunk_paths: list[Path],
+        chunk_seconds: int,
+        recognition_class: object,
+        reporter: object | None = None,
+    ) -> list[TranscriptSegment]:
+        workers = min(max(1, self.settings.dashscope_asr_max_workers), len(chunk_paths))
+
+        def recognize_chunk(item: tuple[int, Path]) -> tuple[int, list[TranscriptSegment]]:
+            index, path = item
+            return self._recognize_chunk(index, path, chunk_seconds, recognition_class)
+
+        results: list[tuple[int, list[TranscriptSegment]]] = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(recognize_chunk, item) for item in enumerate(chunk_paths)]
+            done = 0
+            total = max(1, len(futures))
+            for future in as_completed(futures):
+                results.append(future.result())
+                done += 1
+                if reporter is not None:
+                    reporter.on_transcribe_chunk(done, total)
+
+        segments = [segment for _, chunk in sorted(results) for segment in chunk]
+        segments.sort(key=lambda segment: (segment.start, segment.end))
+        return segments
+
+    def _transcribe_legacy(
+        self,
+        audio_path: Path,
+        task_id: str,
+        recognition_class: object,
+        reporter: object | None = None,
+    ) -> list[TranscriptSegment]:
+        """旧路径：整文件转 16k WAV → 测时长 → 长则切分并行识别。
+
+        作为「无 ffprobe」或「ffmpeg 分片失败」的兜底，行为与原实现完全一致。
+        """
+        self._current_task_id = task_id
+        wav_path = audio_path.parent / f"{task_id}-16k.wav"
+        self.preprocessor.convert_to_wav16k(audio_path, wav_path)
+        try:
+            duration = _wav_duration(wav_path) or 0.0
+            self.last_duration = duration
+            chunk_seconds = max(1, self.settings.dashscope_asr_chunk_seconds)
+            threshold = max(1, self.settings.dashscope_asr_chunk_threshold_seconds)
+            max_workers = max(1, self.settings.dashscope_asr_max_workers)
+            if duration >= threshold and chunk_seconds > 0 and max_workers > 1:
+                chunk_paths = _split_wav(wav_path, task_id, chunk_seconds, duration)
+                if reporter is not None:
+                    reporter.mark_transcribe_started(
+                        duration,
+                        max(1, len(chunk_paths)),
+                    )
+                try:
+                    return self._transcribe_chunks(chunk_paths, chunk_seconds, recognition_class, reporter)
+                finally:
+                    for chunk_path in chunk_paths:
+                        _best_effort_unlink(chunk_path)
+            if reporter is not None:
+                reporter.mark_transcribe_started(duration, 1)
+            segments = self._recognize_file(wav_path, recognition_class)
+            if reporter is not None:
+                reporter.on_transcribe_chunk(1, 1)
+            return segments
+        finally:
+            _best_effort_unlink(wav_path)
 
 
 def _best_effort_unlink(path: Path) -> None:
@@ -176,6 +368,25 @@ def _split_wav(path: Path, task_id: str, chunk_seconds: int, duration: float) ->
             chunks.append(chunk_path)
             index += 1
     return chunks
+
+
+def _write_wav16k(path: Path, pcm: bytes) -> None:
+    """把一段 16kHz 单声道 16-bit PCM 字节写成标准 WAV 文件。
+
+    流水线分片直接来自 ffmpeg 的 raw PCM 输出，需要自带 RIFF 头才能被
+    DashScope 文件接口当 wav 读取。
+    """
+    size = len(pcm)
+    with open(path, "wb") as handle:
+        handle.write(b"RIFF")
+        handle.write(struct.pack("<I", 36 + size))
+        handle.write(b"WAVE")
+        handle.write(b"fmt ")
+        # PCM=1, 单声道, 采样率 16000, 字节率 32000, 块对齐 2, 位深 16
+        handle.write(struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16))
+        handle.write(b"data")
+        handle.write(struct.pack("<I", size))
+        handle.write(pcm)
 
 
 def format_transcript(segments: list[TranscriptSegment], include_timestamps: bool = True) -> str:

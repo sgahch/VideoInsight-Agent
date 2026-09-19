@@ -18,6 +18,8 @@ from app.workflow import detect_platform
 
 # 完整 http(s) 链接：遇到空白或常见中文/引号闭合符即停止。
 _FULL_URL_RE = re.compile(r"https?://[^\s\"'）)】〉]+", re.IGNORECASE)
+# Markdown 链接中的真实地址，如 [标题](https://example.com/video)。
+_MARKDOWN_LINK_RE = re.compile(r"\[[^\]]*\]\((https?://[^)\s]+)\)", re.IGNORECASE)
 # 兜底：无 scheme 的裸域名短链，如 v.douyin.com/xxxx（需要真实域名后缀，避免误吃口令噪声）。
 _BARE_URL_RE = re.compile(
     r"(?:[a-zA-Z0-9-]+\.)+(?:com|cn|net|org|tv|app|live|gov|edu|co)(?:/[^\s\"'）)】〉]+)?",
@@ -60,6 +62,10 @@ class ParsedLink:
 
 
 def _extract_url(text: str) -> str | None:
+    markdown_match = _MARKDOWN_LINK_RE.search(text)
+    if markdown_match:
+        candidate = markdown_match.group(1)
+        return candidate.rstrip("/") or candidate
     match = _FULL_URL_RE.search(text)
     if match:
         return match.group(0).rstrip("/") or match.group(0)
@@ -83,6 +89,17 @@ def _extract_author(text: str) -> str | None:
 
 
 def _extract_title(text: str, url: str | None) -> str | None:
+    # 纯 Markdown 链接没有标题；若前后还有分享文案，只移除链接包装后继续提取。
+    markdown_match = _MARKDOWN_LINK_RE.search(text)
+    if markdown_match and url:
+        markdown_url = markdown_match.group(1).rstrip("/")
+        if markdown_url == url:
+            before = text[: markdown_match.start()]
+            after = text[markdown_match.end() :]
+            if not before.strip() and not after.strip():
+                return None
+            text = f"{before} {after}"
+
     # 优先取《书名号》包裹的标题（可多个，常见“播客特辑《自律》”这种连续结构）。
     books = [b.strip() for b in _BOOKTITLE_RE.findall(text) if b.strip()]
     if books:
@@ -129,9 +146,14 @@ def parse_share_text(text: str) -> ParsedLink:
     # 是否为分享文案（而非干净的纯链接）。忽略结尾斜杠差异，避免把带斜杠的干净链接误判为文案。
     result.is_share_text = (raw.rstrip("/") != url) or bool(_SHARE_HINT_RE.search(raw))
     if result.is_share_text:
+        extracted_parts = []
+        if result.author:
+            extracted_parts.append("作者")
+        if result.title:
+            extracted_parts.append("标题")
+        extracted_summary = "与".join(extracted_parts) if extracted_parts else "干净链接"
         result.note = (
-            f"已从分享文案中解析出{result.platform}链接，已自动提取"
-            f"{'作者与' if result.author else ''}标题。"
+            f"已从分享文案中解析出{result.platform}链接，已自动提取{extracted_summary}。"
         )
     else:
         result.note = "已识别为干净链接，无需裁剪。"

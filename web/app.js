@@ -47,6 +47,13 @@
   /* 每次轮询在目标进度内平滑爬升的幅度上限 */
   const PROGRESS_STEP_MAX = 8;
   const PROGRESS_STEP_MIN = 4;
+  /* 后端实时进度阶段 → 中文标签（真实模式下由 /tasks/{id} 下发 progress/stage） */
+  const STAGE_TEXT = {
+    downloading: "下载中",
+    transcribing: "转写中",
+    analyzing: "AI 分析中",
+    done: "处理完成",
+  };
   const MODE_TEXT = {
     summary: "AI 总结",
     transcript: "逐字稿",
@@ -98,9 +105,19 @@
     progressBar: $("#progressBar"),
     progressPercent: $("#progressPercent"),
 
+    // 分析计时统计
+    timingStats: $("#timingStats"),
+    timingDuration: $("#timingDuration"),
+    timingTranscribe: $("#timingTranscribe"),
+    timingTotal: $("#timingTotal"),
+    timingSpeed: $("#timingSpeed"),
+
     // 结果区
     summaryOutput: $("#summaryOutput"),
+    transcriptToolbar: $("#transcriptToolbar"),
     transcriptOutput: $("#transcriptOutput"),
+    copyTranscriptBtn: $("#copyTranscriptBtn"),
+    transcriptCopyStatus: $("#transcriptCopyStatus"),
     commentsOutput: $("#commentsOutput"),
     rawOutput: $("#rawOutput"),
 
@@ -139,6 +156,7 @@
     promptChips: $("#promptChips"),
     chatInput: $("#chatInput"),
     sendChatBtn: $("#sendChatBtn"),
+    newChatBtn: $("#newChatBtn"),
 
     // 模型设置
     modelState: $("#modelState"),
@@ -150,11 +168,22 @@
     clearModelConfig: $("#clearModelConfig"),
     modelMessage: $("#modelMessage"),
 
+    // 访问令牌（仅在服务端配置了 VIDEOINSIGHT_AUTH_TOKEN 时需要）
+    authSection: $("#auth"),
+    authState: $("#authState"),
+    authToken: $("#authToken"),
+    saveAuthToken: $("#saveAuthToken"),
+    clearAuthToken: $("#clearAuthToken"),
+    authMessage: $("#authMessage"),
+
     // 主题切换
     themeToggle: $("#themeToggle"),
     themeToggleIcon: $("#themeToggleIcon"),
     themeToggleText: $("#themeToggleText"),
   };
+
+  // 初始 AI 对话欢迎语（用于「新建干净对话」时回退）
+  const WELCOME_HTML = els.chatMessages.innerHTML;
 
   /* ======================================================================
    * 3. 运行时状态
@@ -170,6 +199,7 @@
     qrAttempts: 0,
     pendingCookieRetry: null,
     parsedLink: null, // 最新的 /parse-link 解析结果（含干净 url 与建议标签）
+    transcriptText: "",
   };
 
   /* ======================================================================
@@ -177,6 +207,7 @@
    * ==================================================================== */
 
   const CLIENT_ID_KEY = "videoinsight_client_id";
+  const AUTH_TOKEN_KEY = "videoinsight_auth_token";
 
   /**
    * 获取本浏览器的持久化客户端身份标识。
@@ -195,6 +226,34 @@
     }
   }
 
+  /** 读取本地保存的访问令牌；服务端未启用鉴权时它一直是空串。 */
+  function getAuthToken() {
+    try {
+      return localStorage.getItem(AUTH_TOKEN_KEY) || "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  /**
+   * 把访问令牌换成 HttpOnly Cookie。
+   *
+   * 必须做这一步：媒体是通过 `<video src>` / `<a href>` 由浏览器原生发起的，
+   * 这些请求带不了 Authorization 头，只有 Cookie 能通过鉴权。
+   */
+  async function syncAuthSession(token) {
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+    const response = await fetch("/auth/session", {
+      method: "POST",
+      headers: headers,
+      body: JSON.stringify({ token: token }),
+    });
+    return response.ok;
+  }
+
   /**
    * 发起 JSON 请求，统一处理超时与错误信息。
    * 自动附带 X-Client-Id 头，实现任务归属隔离。
@@ -208,6 +267,10 @@
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     const headers = new Headers(options.headers || {});
     headers.set("X-Client-Id", getClientId());
+    const token = getAuthToken();
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
     try {
       const response = await fetch(url, Object.assign({}, options, { headers: headers, signal: controller.signal }));
       const text = await response.text();
@@ -330,6 +393,20 @@
     return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
   }
 
+  /** 把秒数格式化为「分:秒」或「时:分:秒」。 */
+  function formatDuration(seconds) {
+    const num = Number(seconds);
+    if (!seconds || Number.isNaN(num) || num <= 0) {
+      return "-";
+    }
+    const total = Math.floor(num);
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    const pad = (n) => String(n).padStart(2, "0");
+    return hours > 0 ? `${hours}:${pad(minutes)}:${pad(secs)}` : `${minutes}:${pad(secs)}`;
+  }
+
   /** 截断长文本用于列表展示。 */
   function truncate(text, max = 42) {
     const value = String(text || "");
@@ -414,6 +491,132 @@
     return next;
   }
 
+  /**
+   * 用后端下发的真实进度渲染进度条（阶段 + 百分比 + 预计剩余）。
+   * 仅当 task.progress 非空时调用；否则回退到 easeProgress 装饰性动画。
+   * @param {object} task 后端 TaskRecord（含 progress / stage / eta_seconds）
+   */
+  function setRealProgress(task) {
+    const percent = Math.max(0, Math.min(100, Number(task.progress) || 0));
+    els.progressBar.style.width = `${percent}%`;
+    els.progressPercent.textContent = `${Math.round(percent)}%`;
+    els.progressBar.classList.remove("is-done", "is-failed");
+
+    const stage = task.stage || "transcribing";
+    let msg = STAGE_TEXT[stage] || "处理中";
+    const details = [];
+    if (stage === "transcribing" && task.transcribe_total) {
+      details.push(`${task.transcribe_done || 0}/${task.transcribe_total} 片`);
+    }
+    if (task.media_duration_seconds) {
+      details.push(`视频 ${formatDuration(task.media_duration_seconds)}`);
+    }
+    if (task.eta_seconds != null && Number.isFinite(task.eta_seconds)) {
+      details.push(
+        Number(task.eta_seconds) > 1
+          ? `预计剩余 ${formatDuration(task.eta_seconds)}`
+          : "即将完成",
+      );
+    }
+    if (details.length) {
+      msg += ` · ${details.join(" · ")}`;
+    }
+    els.taskMessage.textContent = msg;
+    els.taskMessage.classList.remove("is-error");
+  }
+
+  /** 把带时间戳的逐字稿渲染成可扫描的分段视图，同时保留原文供复制。 */
+  function syncTranscriptToolbar() {
+    const activeTab = document.querySelector(".tab-btn.active");
+    els.transcriptToolbar.hidden = !state.transcriptText || !activeTab || activeTab.dataset.target !== "transcriptOutput";
+  }
+
+  function renderTranscript(transcript) {
+    const text = String(transcript || "").trim();
+    state.transcriptText = text;
+    els.transcriptCopyStatus.textContent = "";
+    if (!text) {
+      syncTranscriptToolbar();
+      els.transcriptOutput.textContent = "无逐字稿";
+      return;
+    }
+
+    syncTranscriptToolbar();
+    els.transcriptOutput.innerHTML = "";
+    const fragment = document.createDocumentFragment();
+    text.split(/\r?\n/).forEach((line) => {
+      const match = line.match(/^\[([0-9:.]+)-([0-9:.]+)\]\s*(.*)$/);
+      const item = document.createElement("article");
+      item.className = "transcript-segment";
+      if (match) {
+        const time = document.createElement("button");
+        time.type = "button";
+        time.className = "transcript-time";
+        time.textContent = `${formatTranscriptTime(match[1])}–${formatTranscriptTime(match[2])}`;
+        time.title = "跳转到此时间";
+        time.dataset.seconds = String(parseTranscriptTime(match[1]));
+        time.addEventListener("click", () => seekTranscript(parseTranscriptTime(match[1])));
+
+        const body = document.createElement("p");
+        body.className = "transcript-text";
+        body.textContent = match[3];
+        item.append(time, body);
+      } else if (line.trim()) {
+        item.classList.add("transcript-segment-plain");
+        item.textContent = line;
+      }
+      if (item.textContent || item.children.length) {
+        fragment.appendChild(item);
+      }
+    });
+    els.transcriptOutput.appendChild(fragment);
+  }
+
+  function parseTranscriptTime(value) {
+    const parts = String(value).split(":").map(Number);
+    if (parts.some((part) => !Number.isFinite(part))) return 0;
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return parts[0] || 0;
+  }
+
+  function formatTranscriptTime(value) {
+    const seconds = Math.max(0, Math.floor(parseTranscriptTime(value)));
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainder = seconds % 60;
+    return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}` : `${minutes}:${String(remainder).padStart(2, "0")}`;
+  }
+
+  function seekTranscript(seconds) {
+    const media = els.mediaVideo.hidden ? els.mediaAudio : els.mediaVideo;
+    if (!media.hidden && Number.isFinite(seconds) && media.duration) {
+      media.currentTime = Math.min(seconds, media.duration);
+      media.play().catch(() => {});
+    }
+  }
+
+  async function copyTranscript() {
+    if (!state.transcriptText) return;
+    try {
+      await navigator.clipboard.writeText(state.transcriptText);
+    } catch (error) {
+      const helper = document.createElement("textarea");
+      helper.value = state.transcriptText;
+      helper.setAttribute("readonly", "");
+      helper.style.position = "fixed";
+      helper.style.opacity = "0";
+      document.body.appendChild(helper);
+      helper.select();
+      document.execCommand("copy");
+      helper.remove();
+    }
+    els.transcriptCopyStatus.textContent = "已复制";
+    window.setTimeout(() => {
+      els.transcriptCopyStatus.textContent = "";
+    }, 1800);
+  }
+
   /** 把后端返回的 TaskRecord 渲染到页面上。 */
   function applyTask(task) {
     state.currentTask = task;
@@ -450,14 +653,29 @@
     } else if (task.status === "succeeded") {
       setTaskStatus("succeeded", "分析完成。");
       els.summaryOutput.innerHTML = renderMarkdown(task.result ? task.result.output : "无结果");
-      els.transcriptOutput.textContent = (task.result && task.result.transcript) || "无逐字稿";
+      renderTranscript(task.result && task.result.transcript);
       renderComments(task);
     } else {
       els.commentsOutput.textContent = "暂无观众评论";
     }
 
     updateAgentContext();
+    renderTiming(task);
     highlightHistory(task.task_id);
+  }
+
+  /** 渲染分析计时统计：原视频时长 / 转写用时 / 总用时 / 加速倍数。 */
+  function renderTiming(task) {
+    const diag = (task.result && task.result.diagnostics) || null;
+    if (!diag || task.status !== "succeeded") {
+      els.timingStats.hidden = true;
+      return;
+    }
+    els.timingStats.hidden = false;
+    els.timingDuration.textContent = formatDuration(diag.media_duration_seconds);
+    els.timingTranscribe.textContent = formatDuration(diag.transcribe_seconds);
+    els.timingTotal.textContent = formatDuration(diag.total_seconds);
+    els.timingSpeed.textContent = diag.asr_speed_x ? `${diag.asr_speed_x}× 实时` : "—";
   }
 
   /** 渲染媒体播放器与下载链接（仅在任务成功后展示）。 */
@@ -583,6 +801,64 @@
   }
 
   /**
+   * 新建干净对话：清空当前展示的会话视图（任务状态 / 进度条 / 结果 / AI 对话），
+   * 停止轮询，但**不删除任何历史任务记录**。
+   * 目的在于让用户直接在新的输入框里粘贴链接，而不必去历史任务里重新复制。
+   */
+  function resetCurrentSession() {
+    stopPolling();
+    state.currentTaskId = null;
+    state.currentTask = null;
+    state.pendingCookieRetry = null;
+
+    // 任务状态卡片回到待命
+    els.taskStatusBadge.className = "badge badge-muted";
+    els.taskStatusBadge.textContent = "待命";
+    els.taskId.textContent = "—";
+    els.taskSource.textContent = "—";
+    els.taskMessage.classList.remove("is-error");
+    els.taskMessage.textContent = "已新建干净对话，粘贴链接或上传文件开始分析。";
+    els.progressBar.classList.remove("is-done", "is-failed");
+    els.progressBar.style.width = "0%";
+    els.progressPercent.textContent = "0%";
+
+    // 计时统计
+    els.timingStats.hidden = true;
+    els.timingDuration.textContent = "—";
+    els.timingTranscribe.textContent = "—";
+    els.timingTotal.textContent = "—";
+    els.timingSpeed.textContent = "—";
+
+    // 结果区：回到默认，并切回「总结」Tab
+    els.summaryOutput.innerHTML = "等待分析任务完成后显示结果...";
+    els.transcriptOutput.textContent = "暂无逐字稿";
+    els.transcriptToolbar.hidden = true;
+    els.transcriptCopyStatus.textContent = "";
+    state.transcriptText = "";
+    els.commentsOutput.textContent = "暂无观众评论";
+    els.rawOutput.textContent = "{}";
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.target === "summaryOutput");
+    });
+    ["summaryOutput", "transcriptOutput", "commentsOutput", "rawOutput"].forEach((id) => {
+      const panel = document.getElementById(id);
+      if (panel) {
+        panel.style.display = id === "summaryOutput" ? "block" : "none";
+      }
+    });
+
+    // 媒体区
+    renderMedia({ status: "queued", result: null, request: { url: "" } });
+
+    // AI 对话区：回到欢迎语
+    els.chatMessages.innerHTML = WELCOME_HTML;
+    updateAgentContext();
+
+    // 清除历史列表高亮
+    highlightHistory(null);
+  }
+
+  /**
    * 轮询任务状态直至终态或达到最大次数。
    * 进度条从 0% 起步，在 queued/running 期间平滑递增，
    * 到达 succeeded / failed 时定格到 100%。
@@ -611,14 +887,18 @@
       }
       try {
         const task = await fetchJson(`/tasks/${taskId}`, {}, 10000);
-        // 排队/处理中：平滑递增；终态：直接定格到目标进度
+        // 排队/处理中：有真实进度用服务端下发值，否则平滑递增；终态：直接定格。
         if (task.status === "succeeded") {
           setTaskStatus("succeeded", "分析完成。");
         } else if (task.status === "failed") {
           setTaskStatus("failed", task.error || "任务失败。");
         } else {
-          easeProgress(task.status);
           applyTask(task);
+          if (task.progress != null && task.progress != undefined) {
+            setRealProgress(task);
+          } else {
+            easeProgress(task.status);
+          }
           return;
         }
         applyTask(task);
@@ -1477,7 +1757,108 @@
   }
 
   /* ======================================================================
-   * 11. 服务状态
+   * 11. 访问令牌（仅在服务端启用鉴权时出现）
+   * ==================================================================== */
+
+  /**
+   * 用已保存的令牌换取 HttpOnly Cookie。
+   * 媒体由 `<video src>` / `<a href>` 原生发起，带不了 Authorization 头，
+   * 只有 Cookie 能让它们通过鉴权。
+   * @returns {Promise<boolean>} 令牌是否有效
+   */
+  async function ensureAuthSession() {
+    const token = getAuthToken();
+    if (!token) {
+      return false;
+    }
+    try {
+      return await syncAuthSession(token);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function renderAuthState(valid) {
+    const token = getAuthToken();
+    if (!token) {
+      els.authState.className = "badge badge-danger";
+      els.authState.textContent = "未设置";
+      return;
+    }
+    if (valid === false) {
+      els.authState.className = "badge badge-danger";
+      els.authState.textContent = "令牌无效";
+      return;
+    }
+    els.authState.className = "badge badge-success";
+    els.authState.textContent = "已验证";
+  }
+
+  function setAuthMessage(message, kind = "") {
+    els.authMessage.textContent = message;
+    els.authMessage.className = `cookie-message${kind ? ` is-${kind}` : ""}`;
+  }
+
+  async function saveAuthToken() {
+    const token = els.authToken.value.trim();
+    if (!token) {
+      setAuthMessage("请填写访问令牌。", "error");
+      return;
+    }
+    let ok = false;
+    try {
+      ok = await syncAuthSession(token);
+    } catch (error) {
+      setAuthMessage(`验证失败：${error.message}`, "error");
+      return;
+    }
+    if (!ok) {
+      setAuthMessage("访问令牌不正确。", "error");
+      renderAuthState(false);
+      return;
+    }
+    try {
+      localStorage.setItem(AUTH_TOKEN_KEY, token);
+    } catch (error) {
+      setAuthMessage(`保存失败：${error.message}`, "error");
+      return;
+    }
+    renderAuthState(true);
+    setAuthMessage("令牌已验证，媒体预览与下载也已生效。", "ok");
+    // 鉴权通过后把之前失败的请求补上
+    await refreshCookieStatus();
+    await loadHistory();
+  }
+
+  async function clearAuthToken() {
+    try {
+      localStorage.removeItem(AUTH_TOKEN_KEY);
+    } catch (error) {
+      // 忽略清除失败
+    }
+    els.authToken.value = "";
+    try {
+      await fetch("/auth/session", { method: "DELETE" });
+    } catch (error) {
+      // 清除 Cookie 失败不影响本地令牌移除
+    }
+    renderAuthState();
+    setAuthMessage("已清除本地令牌。", "ok");
+  }
+
+  function bindAuthSettings() {
+    els.saveAuthToken.addEventListener("click", saveAuthToken);
+    els.clearAuthToken.addEventListener("click", clearAuthToken);
+    els.authToken.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        saveAuthToken();
+      }
+    });
+    els.authToken.value = getAuthToken();
+  }
+
+  /* ======================================================================
+   * 12. 服务状态
    * ==================================================================== */
 
   /** 拉取 /health 并展示服务与默认模式。 */
@@ -1491,6 +1872,15 @@
           : "未配置 cookies";
       els.statusDot.classList.remove("is-offline");
       els.serviceState.textContent = `服务正常 · 默认 ${health.mock_mode ? "Mock" : "真实"} 模式 · ${cookieState}`;
+
+      if (health.auth_required) {
+        els.authSection.hidden = false;
+        const valid = await ensureAuthSession();
+        renderAuthState(valid);
+        if (!valid) {
+          setAuthMessage("本服务已启用访问鉴权，请填写访问令牌后使用。", "error");
+        }
+      }
     } catch (error) {
       els.statusDot.classList.add("is-offline");
       els.serviceState.textContent = "本地服务未连接";
@@ -1507,12 +1897,13 @@
         document.querySelectorAll(".tab-btn").forEach((item) => item.classList.remove("active"));
         button.classList.add("active");
         const target = document.getElementById(button.dataset.target);
-        ["summaryOutput", "transcriptOutput", "rawOutput"].forEach((id) => {
+        ["summaryOutput", "transcriptOutput", "commentsOutput", "rawOutput"].forEach((id) => {
           const panel = document.getElementById(id);
           if (panel) {
             panel.style.display = panel === target ? "block" : "none";
           }
         });
+        syncTranscriptToolbar();
       });
     });
   }
@@ -1596,6 +1987,8 @@
     els.captureCookieBrowser.addEventListener("click", captureCookieBrowser);
 
     els.sendChatBtn.addEventListener("click", () => sendChat(els.chatInput.value));
+    els.newChatBtn.addEventListener("click", resetCurrentSession);
+    els.copyTranscriptBtn.addEventListener("click", copyTranscript);
     els.chatInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         sendChat(els.chatInput.value);
@@ -1616,6 +2009,7 @@
     });
 
     bindModelSettings();
+    bindAuthSettings();
     bindThemeToggle();
   }
 
