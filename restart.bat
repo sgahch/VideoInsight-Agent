@@ -7,7 +7,7 @@ REM    2) start uvicorn with the project's own venv python
 REM  This file MUST stay in the project root folder.
 REM ============================================================
 
-setlocal
+setlocal EnableDelayedExpansion
 
 set "PROJ=%~dp0"
 set "PORT=8000"
@@ -34,15 +34,31 @@ if not exist "%PY%" (
 
 echo [1/3] Stopping old service on port %PORT% ...
 set "KILLED=0"
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr LISTENING ^| findstr /C:":%PORT% "') do (
-    echo     - killing PID %%a
-    taskkill /PID %%a /F >nul 2>&1
-    set "KILLED=1"
+REM NOTE: the service runs as a parent process plus a forked worker, and the
+REM listening socket is held by the WORKER. A plain kill leaves that worker
+REM orphaned and still holding the port (uvicorn then fails with error 10048).
+REM So: "/T" kills the whole process tree, and we keep re-checking until the
+REM port is really free.
+for /L %%i in (1,1,6) do (
+    set "FOUND=0"
+    for /f "tokens=5" %%a in ('netstat -ano ^| findstr LISTENING ^| findstr /C:":%PORT% "') do (
+        echo     - killing PID %%a and its child processes
+        taskkill /PID %%a /F /T >nul 2>&1
+        set "FOUND=1"
+        set "KILLED=1"
+    )
+    if "!FOUND!"=="0" goto :port_free
+    timeout /t 1 /nobreak >nul
 )
-if "%KILLED%"=="0" echo     - nothing was running on port %PORT%
+:port_free
+if "!KILLED!"=="0" (
+    echo     - nothing was running on port %PORT%
+) else (
+    echo     - port %PORT% is free now
+)
 
-echo [2/3] Waiting for the port to be released ...
-timeout /t 2 /nobreak >nul
+echo [2/3] Waiting for the port to settle ...
+timeout /t 1 /nobreak >nul
 
 echo [3/3] Starting uvicorn ...
 echo     URL: http://127.0.0.1:%PORT%/
