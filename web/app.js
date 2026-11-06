@@ -19,7 +19,6 @@
    * ==================================================================== */
 
   const POLL_INTERVAL_MS = 2000;
-  const POLL_MAX_ATTEMPTS = 3600; // 最多轮询约 2 小时，覆盖长视频下载与 ASR
   const QR_POLL_INTERVAL_MS = 3000;
   const QR_POLL_MAX_ATTEMPTS = 100; // 约 5 分钟
   const DEFAULT_TIMEOUT_MS = 20000;
@@ -120,6 +119,8 @@
     transcriptCopyStatus: $("#transcriptCopyStatus"),
     commentsOutput: $("#commentsOutput"),
     rawOutput: $("#rawOutput"),
+    copyPanelBtn: $("#copyPanelBtn"),
+    expandPanelBtn: $("#expandPanelBtn"),
 
     // 媒体
     mediaPanel: $("#mediaPanel"),
@@ -162,6 +163,8 @@
     modelState: $("#modelState"),
     llmProvider: $("#llmProvider"),
     llmBaseUrl: $("#llmBaseUrl"),
+    llmProtocol: $("#llmProtocol"),
+    testModelConfig: $("#testModelConfig"),
     llmModel: $("#llmModel"),
     llmApiKey: $("#llmApiKey"),
     saveModelConfig: $("#saveModelConfig"),
@@ -193,13 +196,18 @@
     currentTaskId: null, // 当前展示/对话所依据的任务
     currentTask: null,
     pollTimer: null,
-    pollAttempts: 0,
+    watchVersion: 0,
+    streamController: null,
+    chatController: null,
+    renderedTaskId: null,
+    mediaKey: null,
     qrSessionId: null,
     qrTimer: null,
     qrAttempts: 0,
     pendingCookieRetry: null,
     parsedLink: null, // 最新的 /parse-link 解析结果（含干净 url 与建议标签）
     transcriptText: "",
+    summaryText: "", // AI 总结原始 Markdown，供「复制」按钮使用
   };
 
   /* ======================================================================
@@ -207,6 +215,9 @@
    * ==================================================================== */
 
   const CLIENT_ID_KEY = "videoinsight_client_id";
+  const ACTIVE_TASK_KEY = "videoinsight_active_task";
+  let accountLoginEnabled = false;
+  let serverModelConfig = null;
   const AUTH_TOKEN_KEY = "videoinsight_auth_token";
 
   /**
@@ -283,7 +294,10 @@
         }
       }
       if (!response.ok) {
-        throw new Error(extractError(data, response));
+        if (response.status === 401 && accountLoginEnabled) window.location.replace("/login");
+        const error = new Error(extractError(data, response));
+        error.status = response.status;
+        throw error;
       }
       return data;
     } catch (error) {
@@ -293,6 +307,76 @@
       throw error;
     } finally {
       window.clearTimeout(timer);
+    }
+  }
+
+  function rememberTask(taskId) {
+    try {
+      if (taskId) {
+        localStorage.setItem(ACTIVE_TASK_KEY, JSON.stringify({ clientId: getClientId(), taskId }));
+      } else {
+        localStorage.removeItem(ACTIVE_TASK_KEY);
+      }
+    } catch (error) { /* Storage may be disabled. */ }
+  }
+
+  async function fetchEvents(url, options, onEvent, controller, idleMs = 45000) {
+    const headers = new Headers(options.headers || {});
+    headers.set("X-Client-Id", getClientId());
+    headers.set("Accept", "text/event-stream");
+    const token = getAuthToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    let timer;
+    let reader;
+    const refreshTimeout = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => controller.abort(), idleMs);
+    };
+    refreshTimeout();
+    try {
+      const response = await fetch(url, Object.assign({}, options, { headers, signal: controller.signal }));
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        const error = new Error(extractError(data, response));
+        error.status = response.status;
+        if (error.status === 401 && accountLoginEnabled) window.location.replace("/login");
+        throw error;
+      }
+      if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+        throw new Error("实时连接不可用");
+      }
+      reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        refreshTimeout();
+        buffer += decoder.decode(value, { stream: !done });
+        buffer = buffer.replace(/\r\n/g, "\n");
+        let boundary;
+        while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          let event = "message";
+          const data = [];
+          frame.split("\n").forEach((line) => {
+            if (line.startsWith("event:")) event = line.slice(6).trim();
+            if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+          });
+          if (!data.length) continue;
+          const payload = JSON.parse(data.join("\n"));
+          if (event === "error") {
+            const error = new Error(payload.detail || "实时连接中断");
+            error.status = payload.status;
+            throw error;
+          }
+          if (onEvent(event, payload) === true) return;
+        }
+        if (done) throw new Error("实时连接已断开");
+      }
+    } finally {
+      window.clearTimeout(timer);
+      if (reader) await reader.cancel().catch(() => {});
     }
   }
 
@@ -424,6 +508,7 @@
     }
     const config = loadModelConfig();
     if (!config) {
+      if (serverModelConfig) return {};
       setTaskStatus("failed", "AI 总结或观点提取需要先配置 API Key；逐字稿提取无需配置。");
       setModelMessage("请先保存 API Key，再重新提交 AI 分析。逐字稿提取不需要 API Key。", "error");
       scrollToSettings();
@@ -432,6 +517,7 @@
     return {
       llm_provider: config.provider,
       llm_base_url: config.baseUrl,
+      llm_protocol: config.protocol || "chat_completions",
       llm_model: config.model,
       llm_api_key: config.apiKey,
     };
@@ -596,13 +682,14 @@
     }
   }
 
-  async function copyTranscript() {
-    if (!state.transcriptText) return;
+  /** 统一剪贴板写入：优先 async API，失败回退到隐藏 textarea。 */
+  async function copyToClipboard(text) {
+    if (!text) return;
     try {
-      await navigator.clipboard.writeText(state.transcriptText);
+      await navigator.clipboard.writeText(text);
     } catch (error) {
       const helper = document.createElement("textarea");
-      helper.value = state.transcriptText;
+      helper.value = text;
       helper.setAttribute("readonly", "");
       helper.style.position = "fixed";
       helper.style.opacity = "0";
@@ -611,33 +698,109 @@
       document.execCommand("copy");
       helper.remove();
     }
+  }
+
+  async function copyTranscript() {
+    if (!state.transcriptText) return;
+    await copyToClipboard(state.transcriptText);
     els.transcriptCopyStatus.textContent = "已复制";
     window.setTimeout(() => {
       els.transcriptCopyStatus.textContent = "";
     }, 1800);
   }
 
+  /* ---------- 结果区视图操作：复制 / 展开全文 ---------- */
+
+  /* 每个面板复制时使用的原文（优先未渲染的纯文本，其次面板可见文本） */
+  const PANEL_TEXT = {
+    summaryOutput: () => state.summaryText || els.summaryOutput.textContent,
+    transcriptOutput: () => state.transcriptText || els.transcriptOutput.textContent,
+    commentsOutput: () => els.commentsOutput.textContent,
+    rawOutput: () => els.rawOutput.textContent,
+  };
+
+  function activePanelId() {
+    const activeTab = document.querySelector(".tab-btn.active");
+    return activeTab ? activeTab.dataset.target : "summaryOutput";
+  }
+
+  /** 让「展开全文」按钮的文案与当前面板状态保持一致。 */
+  function syncResultActions() {
+    if (!els.expandPanelBtn) return;
+    const panel = document.getElementById(activePanelId());
+    const expanded = Boolean(panel && panel.classList.contains("is-expanded"));
+    els.expandPanelBtn.textContent = expanded ? "收起" : "展开全文";
+    els.expandPanelBtn.classList.toggle("is-active", expanded);
+    els.expandPanelBtn.setAttribute("aria-pressed", String(expanded));
+  }
+
+  async function copyActivePanel() {
+    const text = (PANEL_TEXT[activePanelId()] || (() => ""))();
+    if (!String(text || "").trim()) return;
+    await copyToClipboard(String(text));
+    if (els.copyPanelBtn) {
+      els.copyPanelBtn.textContent = "已复制";
+      window.setTimeout(() => {
+        els.copyPanelBtn.textContent = "复制";
+      }, 1600);
+    }
+  }
+
+  function toggleActivePanel() {
+    const panel = document.getElementById(activePanelId());
+    if (!panel) return;
+    panel.classList.toggle("is-expanded");
+    syncResultActions();
+  }
+
+  function bindResultActions() {
+    if (els.copyPanelBtn) {
+      els.copyPanelBtn.addEventListener("click", copyActivePanel);
+    }
+    if (els.expandPanelBtn) {
+      els.expandPanelBtn.addEventListener("click", toggleActivePanel);
+    }
+    syncResultActions();
+  }
+
   /** 把后端返回的 TaskRecord 渲染到页面上。 */
   function applyTask(task) {
+    const previous = state.currentTask;
+    const switched = state.renderedTaskId !== task.task_id;
+    if (switched) {
+      state.transcriptText = "";
+      state.summaryText = "";
+      renderTranscript("");
+      els.commentsOutput.textContent = "暂无观众评论";
+    }
     state.currentTask = task;
     state.currentTaskId = task.task_id;
+    state.renderedTaskId = task.task_id;
+    rememberTask(task.task_id);
 
     els.taskId.textContent = task.task_id;
     els.taskSource.textContent = task.request && task.request.label ? task.request.label : (task.request ? task.request.url : "-");
-    els.rawOutput.textContent = JSON.stringify(task, null, 2);
+    if (activePanelId() === "rawOutput") els.rawOutput.textContent = JSON.stringify(task, null, 2);
 
-    renderMedia(task);
+    const mediaKey = `${task.task_id}:${task.status === "succeeded"}:${task.result?.media?.audio_path || ""}`;
+    if (mediaKey !== state.mediaKey) {
+      renderMedia(task);
+      state.mediaKey = mediaKey;
+    }
 
     if (task.status === "queued") {
       // 保留当前进度宽度，避免打断轮询期间的平滑递增
       setTaskStatus("queued", "任务已提交，等待处理。", parseFloat(els.progressBar.style.width) || 0);
-      els.summaryOutput.textContent = "任务排队中，完成后将显示 AI 总结。";
+      if (!task.result?.output) els.summaryOutput.textContent = "任务排队中，完成后将显示 AI 总结。";
     } else if (task.status === "running") {
-      setTaskStatus("running", "正在下载、转写并分析，较长视频可能需要一两分钟。", parseFloat(els.progressBar.style.width) || 0);
-      els.summaryOutput.textContent = "正在转写/分析中，请稍候…";
+      const message = task.result?.transcript ? "逐字稿已就绪，AI 分析正在生成。" : "正在下载、转写并分析，较长视频可能需要一两分钟。";
+      setTaskStatus("running", message, parseFloat(els.progressBar.style.width) || 0);
+      if (!task.result?.output) {
+        els.summaryOutput.textContent = task.result?.transcript ? "逐字稿已就绪，正在生成 AI 分析…" : "正在转写/分析中，请稍候…";
+      }
     } else if (task.status === "failed") {
       setTaskStatus("failed", task.error || "任务失败。");
-      els.summaryOutput.textContent = task.error || "任务失败。";
+      if (!task.result?.output) els.summaryOutput.textContent = task.error || "任务失败。";
       if (task.request && isCookieFailure(task.error)) {
         state.pendingCookieRetry = {
           url: String(task.request.url || ""),
@@ -652,13 +815,22 @@
       }
     } else if (task.status === "succeeded") {
       setTaskStatus("succeeded", "分析完成。");
-      els.summaryOutput.innerHTML = renderMarkdown(task.result ? task.result.output : "无结果");
-      renderTranscript(task.result && task.result.transcript);
-      renderComments(task);
     } else {
       els.commentsOutput.textContent = "暂无观众评论";
     }
 
+    if (task.result) {
+      const output = String(task.result.output || "");
+      if (output && (switched || output !== state.summaryText)) {
+        state.summaryText = output;
+        els.summaryOutput.innerHTML = renderMarkdown(output);
+      }
+      const transcript = String(task.result.transcript || "");
+      if (transcript !== state.transcriptText) renderTranscript(transcript);
+      if (switched || previous?.status !== task.status || previous?.result?.comments !== task.result.comments) {
+        renderComments(task);
+      }
+    }
     updateAgentContext();
     renderTiming(task);
     highlightHistory(task.task_id);
@@ -739,12 +911,25 @@
     els.mediaPanel.hidden = false;
   }
 
+  const commentPreferences = {sort:"likes", scope:"roots"};
+
   /** 渲染观众评论（按后端归一化后的 comments 树）。无评论时显示原因/状态。 */
   function renderComments(task) {
     const box = els.commentsOutput;
     box.innerHTML = "";
     const result = task.result || {};
     const comments = result.comments;
+    const commentJobId = result.diagnostics && result.diagnostics.comment_job_id;
+    if (commentJobId) {
+      const message = document.createElement("p");
+      message.textContent = result.diagnostics.comments_source;
+      const link = document.createElement("a");
+      link.href = `/comments?job=${encodeURIComponent(commentJobId)}`;
+      link.className = "btn btn-secondary";
+      link.textContent = "查看评论、子评论与热评前 10";
+      box.append(message, link);
+      return;
+    }
     if (!comments || !comments.length) {
       const reason = (result.diagnostics && result.diagnostics.comments_source) || "未配置 MediaCrawler 评论源";
       const empty = document.createElement("div");
@@ -755,15 +940,49 @@
     }
     const summary = document.createElement("div");
     summary.className = "comments-summary";
-    summary.textContent = `共 ${comments.length} 条观众评论`;
+    const flat = CommentUtils.flatten(comments);
+    const source = result.diagnostics?.comments_source || "";
+    const limited = source.startsWith("抖音评论接口::");
+    summary.textContent = `已获取 ${flat.length} 条 · 一级评论 ${comments.length} 条 · 子评论 ${flat.length-comments.length} 条`;
     box.appendChild(summary);
+    if (limited) {
+      const warning = document.createElement("p");
+      warning.className = "comments-empty";
+      warning.textContent = "旧版抖音热门样本，不含子评论；排序及前 10 仅针对这些样本，不代表完整评论区。";
+      const link = document.createElement("a");
+      link.href = `/comments?url=${encodeURIComponent(task.request?.url || "")}`;
+      link.textContent = "前往评论中心";
+      box.append(warning, link);
+    }
+    const toolbar = document.createElement("div");
+    toolbar.className = "comments-filter-toolbar";
+    const makeSelect = (name, key, options) => {
+      const label = document.createElement("label");
+      label.append(document.createTextNode(name));
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", name);
+      for (const [value, text] of options) {
+        const option = document.createElement("option");
+        option.value = value;option.textContent = text;select.append(option);
+      }
+      select.value = commentPreferences[key];
+      select.onchange = () => {commentPreferences[key]=select.value;renderComments(task);};
+      label.append(select);toolbar.append(label);
+    };
+    makeSelect("排序", "sort", [["likes","最热 · 点赞数"],["newest","最新 · 发布时间"],["top10","热评前 10"],["collected","采集顺序"]]);
+    makeSelect("范围", "scope", [["roots","一级评论"],["all","全部评论"],["replies","仅子评论"]]);
+    box.append(toolbar);
     const list = document.createElement("ul");
     list.className = "comment-list";
-    comments.forEach((comment) => list.appendChild(buildCommentNode(comment)));
+    const visible = CommentUtils.select(comments, commentPreferences.sort, commentPreferences.scope);
+    visible.forEach((comment) => list.appendChild(buildCommentNode(comment, commentPreferences.scope==="roots")));
+    if (!visible.length) {
+      const empty = document.createElement("li");empty.className="comments-empty";empty.textContent="当前范围暂无已获取评论。";list.append(empty);
+    }
     box.appendChild(list);
   }
 
-  function buildCommentNode(comment) {
+  function buildCommentNode(comment, includeReplies = true) {
     const li = document.createElement("li");
     li.className = "comment-item";
     const head = document.createElement("div");
@@ -781,11 +1000,19 @@
     body.textContent = comment.content || "";
     li.appendChild(head);
     li.appendChild(body);
-    if (comment.sub_comments && comment.sub_comments.length) {
+    const time = document.createElement("small");
+    time.className = "comment-time";
+    time.textContent = CommentUtils.formatTime(comment.create_time);
+    if (comment.root_comment_id)time.textContent+=` · 回复 ${comment.parent_comment_id || comment.root_comment_id}`;
+    li.append(time);
+    if (includeReplies && comment.sub_comments && comment.sub_comments.length) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = `回复 (${CommentUtils.flatten(comment.sub_comments).length})`;
       const sub = document.createElement("ul");
       sub.className = "comment-sublist";
       comment.sub_comments.forEach((subComment) => sub.appendChild(buildCommentNode(subComment)));
-      li.appendChild(sub);
+      details.append(summary,sub);li.append(details);
     }
     return li;
   }
@@ -795,9 +1022,11 @@
    * ==================================================================== */
 
   function stopPolling() {
-    window.clearInterval(state.pollTimer);
+    window.clearTimeout(state.pollTimer);
     state.pollTimer = null;
-    state.pollAttempts = 0;
+    state.watchVersion += 1;
+    if (state.streamController) state.streamController.abort();
+    state.streamController = null;
   }
 
   /**
@@ -807,8 +1036,14 @@
    */
   function resetCurrentSession() {
     stopPolling();
+    if (state.chatController) state.chatController.abort();
+    state.chatController = null;
+    setChatBusy(false);
+    rememberTask(null);
     state.currentTaskId = null;
     state.currentTask = null;
+    state.renderedTaskId = null;
+    state.mediaKey = null;
     state.pendingCookieRetry = null;
 
     // 任务状态卡片回到待命
@@ -835,6 +1070,7 @@
     els.transcriptToolbar.hidden = true;
     els.transcriptCopyStatus.textContent = "";
     state.transcriptText = "";
+    state.summaryText = "";
     els.commentsOutput.textContent = "暂无观众评论";
     els.rawOutput.textContent = "{}";
     document.querySelectorAll(".tab-btn").forEach((btn) => {
@@ -846,6 +1082,7 @@
         panel.style.display = id === "summaryOutput" ? "block" : "none";
       }
     });
+    syncResultActions();
 
     // 媒体区
     renderMedia({ status: "queued", result: null, request: { url: "" } });
@@ -858,62 +1095,81 @@
     highlightHistory(null);
   }
 
-  /**
-   * 轮询任务状态直至终态或达到最大次数。
-   * 进度条从 0% 起步，在 queued/running 期间平滑递增，
-   * 到达 succeeded / failed 时定格到 100%。
-   * @param {string} taskId 任务 ID
-   */
+  /** Prefer resumable events; fall back to non-overlapping, retryable polling. */
   function startPolling(taskId) {
     stopPolling();
+    const version = state.watchVersion;
     state.currentTaskId = taskId;
+    rememberTask(taskId);
     els.taskId.textContent = taskId;
-    // 新任务从 0% 起步
-    els.progressBar.style.width = "0%";
-    els.progressPercent.textContent = "0%";
-    setTaskStatus("queued", "任务已提交，正在等待后端处理。");
+    if (state.renderedTaskId !== taskId) {
+      state.currentTask = null;
+      els.progressBar.style.width = "0%";
+      els.progressPercent.textContent = "0%";
+      setTaskStatus("queued", "任务已提交，正在等待后端处理。");
+    }
+    let failures = 0;
+    let nextStreamAt = 0;
+    const current = () => state.watchVersion === version && state.currentTaskId === taskId;
+    const accept = (task) => {
+      if (!current()) return true;
+      applyTask(task);
+      if (task.status === "succeeded" || task.status === "failed") {
+        stopPolling();
+        loadHistory().catch(() => {});
+        return true;
+      }
+      if (task.progress != null) setRealProgress(task);
+      else easeProgress(task.status);
+      return false;
+    };
 
     const tick = async () => {
-      state.pollAttempts += 1;
-      if (state.pollAttempts > POLL_MAX_ATTEMPTS) {
-        stopPolling();
-        setTaskStatus(
-          "running",
-          "任务仍在后台处理，长视频可能需要较长时间；请稍后在历史任务中查看结果。",
-          parseFloat(els.progressBar.style.width) || 0,
-        );
-        loadHistory().catch(() => {});
-        return;
+      if (!current()) return;
+      if (Date.now() >= nextStreamAt) {
+        const controller = new AbortController();
+        state.streamController = controller;
+        try {
+          await fetchEvents(`/tasks/${taskId}/events`, {}, (event, data) => {
+            if (!current()) return true;
+            failures = 0;
+            if (event === "snapshot" || event === "complete") return accept(data);
+            if (!state.currentTask) return false;
+            if (event === "progress") return accept(Object.assign({}, state.currentTask, data));
+            if (event === "delta" && state.currentTask.result) {
+              const result = Object.assign({}, state.currentTask.result, { output: state.currentTask.result.output + data.text });
+              applyTask(Object.assign({}, state.currentTask, { result }));
+            }
+            return false;
+          }, controller);
+          return;
+        } catch (error) {
+          if (!current()) return;
+          nextStreamAt = error.status === 404 ? Infinity : Date.now() + 30000;
+        } finally {
+          if (state.streamController === controller) state.streamController = null;
+        }
       }
       try {
         const task = await fetchJson(`/tasks/${taskId}`, {}, 10000);
-        // 排队/处理中：有真实进度用服务端下发值，否则平滑递增；终态：直接定格。
-        if (task.status === "succeeded") {
-          setTaskStatus("succeeded", "分析完成。");
-        } else if (task.status === "failed") {
-          setTaskStatus("failed", task.error || "任务失败。");
-        } else {
-          applyTask(task);
-          if (task.progress != null && task.progress != undefined) {
-            setRealProgress(task);
-          } else {
-            easeProgress(task.status);
-          }
+        if (accept(task)) return;
+        failures = 0;
+      } catch (error) {
+        if (!current()) return;
+        if ([401, 403, 404].includes(error.status)) {
+          stopPolling();
+          if (error.status === 404) rememberTask(null);
+          els.taskMessage.textContent = error.status === 404 ? "任务不存在或已被删除。" : "登录或访问令牌已失效，请重新验证。";
           return;
         }
-        applyTask(task);
-        if (task.status === "succeeded" || task.status === "failed") {
-          stopPolling();
-          await loadHistory();
-        }
-      } catch (error) {
-        stopPolling();
-        setTaskStatus("failed", `获取任务状态失败：${error.message}`);
+        failures += 1;
+        els.taskMessage.textContent = "连接暂时中断，正在重试；后台任务不受影响。";
+        els.taskMessage.classList.remove("is-error");
       }
+      if (current()) state.pollTimer = window.setTimeout(tick, Math.min(POLL_INTERVAL_MS * (2 ** failures), 15000));
     };
 
     tick();
-    state.pollTimer = window.setInterval(tick, POLL_INTERVAL_MS);
   }
 
   /** 上传文件分析。 */
@@ -1068,7 +1324,7 @@
   /** 加载最近 50 条任务。 */
   async function loadHistory() {
     try {
-      const tasks = await fetchJson("/tasks?limit=50", {}, 10000);
+      const tasks = await fetchJson("/tasks?limit=50&view=summary", {}, 10000);
       renderHistory(tasks);
     } catch (error) {
       els.historyList.innerHTML = "";
@@ -1082,6 +1338,8 @@
 
   /** 计算任务的显示标题：优先 AI 摘要标题，其次媒体标题，最后模式名。 */
   function taskDisplayTitle(task) {
+    if (task.title && task.title.trim()) return task.title.trim();
+    if (task.media_title && task.media_title.trim() && !task.media_title.startsWith("upload://")) return task.media_title;
     const result = task.result || {};
     if (result.title && result.title.trim()) {
       return result.title.trim();
@@ -1162,14 +1420,25 @@
   /** 回看某个历史任务。 */
   async function openHistoryTask(taskId) {
     stopPolling();
+    const version = state.watchVersion;
     try {
       const task = await fetchJson(`/tasks/${taskId}`, {}, 10000);
+      if (version !== state.watchVersion) return;
       applyTask(task);
       if (task.status === "queued" || task.status === "running") {
         startPolling(taskId);
       }
     } catch (error) {
-      setTaskStatus("failed", `加载任务失败：${error.message}`);
+      if (version !== state.watchVersion) return;
+      if (error.status === 404) {
+        rememberTask(null);
+        setTaskStatus("failed", "任务不存在或已被删除。");
+      } else if ([401, 403].includes(error.status)) {
+        els.taskMessage.textContent = "登录或访问令牌已失效，请重新验证。";
+      } else {
+        startPolling(taskId);
+        els.taskMessage.textContent = "连接暂时中断，正在恢复任务状态。";
+      }
     }
   }
 
@@ -1184,6 +1453,7 @@
         stopPolling();
         state.currentTaskId = null;
         state.currentTask = null;
+        rememberTask(null);
         updateAgentContext();
       }
       await loadHistory();
@@ -1408,7 +1678,7 @@
 
   /** 更新对话框右上角的上下文徽章。 */
   function updateAgentContext() {
-    if (!loadModelConfig()) {
+    if (!loadModelConfig() && !serverModelConfig) {
       els.agentContext.className = "badge badge-danger";
       els.agentContext.textContent = "未配置 API Key";
       els.agentContext.title = "请先在模型设置中配置你的 API Key";
@@ -1426,7 +1696,7 @@
       return;
     }
     const title = (task.result && task.result.media && task.result.media.title) || task.task_id.slice(0, 8);
-    const config = loadModelConfig();
+    const config = loadModelConfig() || serverModelConfig;
     const modelLabel = config && config.model ? ` · ${config.model}` : "";
     els.agentContext.className = "badge badge-agent";
     els.agentContext.textContent = `上下文：${truncate(title, 16)}${modelLabel}`;
@@ -1487,6 +1757,7 @@
    * @param {string} rawQuestion 用户问题
    */
   async function sendChat(rawQuestion) {
+    if (state.chatController) return;
     const question = String(rawQuestion || "").trim();
     if (!question) {
       return;
@@ -1494,7 +1765,7 @@
 
     // 用户必须配置自己的 LLM API Key 才能对话
     const llmConfig = loadModelConfig();
-    if (!llmConfig) {
+    if (!llmConfig && !serverModelConfig) {
       appendBubble(
         "agent",
         "开始对话前，请先在左侧「⚙️ 模型设置」中填写你自己的模型 API Key（如 DeepSeek / OpenAI）。\n\n配置完成后即可使用你自己的模型进行 AI 对话。",
@@ -1533,39 +1804,63 @@
     els.chatInput.value = "";
     const thinking = appendBubble("agent", "思考中...", { thinking: true });
     setChatBusy(true);
+    const controller = new AbortController();
+    state.chatController = controller;
+    let answer = "";
+    let renderTimer = null;
+    const render = () => {
+      renderTimer = null;
+      if (!thinking.isConnected) return;
+      thinking.classList.remove("is-thinking");
+      thinking.innerHTML = renderMarkdown(answer);
+      scrollChatToBottom();
+    };
 
     try {
       // 携带用户自备模型配置，让后端优先使用用户的 LLM
-      const data = await fetchJson(
-        `/tasks/${task.task_id}/chat`,
+      await fetchEvents(
+        `/tasks/${task.task_id}/chat/stream`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(
             Object.assign(
               { question: question },
-              {
+              llmConfig ? {
                 llm_provider: llmConfig.provider,
                 llm_base_url: llmConfig.baseUrl,
+                llm_protocol: llmConfig.protocol || "chat_completions",
                 llm_model: llmConfig.model,
                 llm_api_key: llmConfig.apiKey,
-              },
+              } : {},
             ),
           ),
         },
-        120000,
+        (event, data) => {
+          if (event === "delta") {
+            answer += data.text;
+            if (renderTimer === null) renderTimer = window.setTimeout(render, 80);
+          }
+          return event === "done";
+        },
+        controller,
+        130000,
       );
-      thinking.classList.remove("is-thinking");
-      thinking.innerHTML = renderMarkdown(data.answer || "（后端未返回回答内容）");
-      scrollChatToBottom();
     } catch (error) {
+      if (!thinking.isConnected) return;
       thinking.classList.remove("is-thinking");
-      thinking.textContent = `提问失败：${error.message}`;
+      const message = error.name === "AbortError" ? "连接超时，请稍后重试。" : error.message;
+      thinking.innerHTML = renderMarkdown(answer ? `${answer}\n\n生成中断：${message}` : `提问失败：${message}`);
       thinking.parentElement.classList.add("is-error");
       scrollChatToBottom();
     } finally {
-      setChatBusy(false);
-      els.chatInput.focus();
+      window.clearTimeout(renderTimer);
+      if (!thinking.parentElement.classList.contains("is-error") && answer) render();
+      if (state.chatController === controller) {
+        state.chatController = null;
+        setChatBusy(false);
+        els.chatInput.focus();
+      }
     }
   }
 
@@ -1580,8 +1875,8 @@
   /** 从历史任务中取最近一个成功任务，作为默认对话上下文。 */
   async function pickRecentSucceededTask() {
     try {
-      const tasks = await fetchJson("/tasks?limit=10", {}, 10000);
-      return tasks.find((item) => item.status === "succeeded") || null;
+      const tasks = await fetchJson("/tasks?limit=1&status=succeeded&view=summary", {}, 10000);
+      return tasks.length ? await fetchJson(`/tasks/${tasks[0].task_id}`) : null;
     } catch (error) {
       return null;
     }
@@ -1601,9 +1896,9 @@
 
   const MODEL_CONFIG_KEY = "videoinsight_llm_config";
   const PROVIDER_DEFAULTS = {
-    deepseek: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
-    openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-    custom: { baseUrl: "", model: "" },
+    deepseek: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", protocol: "chat_completions" },
+    openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", protocol: "chat_completions" },
+    custom: { baseUrl: "", model: "", protocol: "chat_completions" },
   };
 
   /** 读取本地保存的模型配置；未配置返回 null。 */
@@ -1622,10 +1917,12 @@
 
   /** 把表单内容填入 UI。 */
   function fillModelForm(config) {
+    config = config || serverModelConfig;
     const provider = (config && config.provider) || "deepseek";
     const defaults = PROVIDER_DEFAULTS[provider] || PROVIDER_DEFAULTS.custom;
     els.llmProvider.value = provider;
     els.llmBaseUrl.value = (config && config.baseUrl) || defaults.baseUrl;
+    els.llmProtocol.value = (config && config.protocol) || defaults.protocol;
     els.llmModel.value = (config && config.model) || defaults.model;
     els.llmApiKey.value = (config && config.apiKey) || "";
   }
@@ -1640,11 +1937,15 @@
     if (!els.llmModel.value || (previous && els.llmModel.value === prevDefaults.model)) {
       els.llmModel.value = defaults.model;
     }
+    if (!els.llmProtocol.value || (previous && els.llmProtocol.value === prevDefaults.protocol)) {
+      els.llmProtocol.value = defaults.protocol;
+    }
   }
 
   /** 更新右上角状态徽章与提示。 */
   function renderModelState() {
-    const config = loadModelConfig();
+    const local = loadModelConfig();
+    const config = local || serverModelConfig;
     if (!config) {
       els.modelState.className = "badge badge-danger";
       els.modelState.textContent = "未配置（逐字稿可用）";
@@ -1657,7 +1958,7 @@
       openai: "OpenAI",
       custom: "自定义",
     }[config.provider] || config.provider;
-    els.modelState.textContent = `${providerLabel} · ${config.model || "默认模型"}`;
+    els.modelState.textContent = `${providerLabel} · ${config.model || "默认模型"}${local ? "" : " · 服务器默认"}`;
     els.modelState.title = config.baseUrl || "";
   }
 
@@ -1665,6 +1966,7 @@
   function saveModelConfig() {
     const provider = els.llmProvider.value;
     const baseUrl = els.llmBaseUrl.value.trim();
+    const protocol = els.llmProtocol.value;
     const model = els.llmModel.value.trim();
     const apiKey = els.llmApiKey.value.trim();
     if (!apiKey) {
@@ -1678,7 +1980,7 @@
     try {
       localStorage.setItem(
         MODEL_CONFIG_KEY,
-        JSON.stringify({ provider, baseUrl, model, apiKey }),
+        JSON.stringify({ provider, baseUrl, protocol, model, apiKey }),
       );
     } catch (error) {
       setModelMessage(`保存失败：${error.message}`, "error");
@@ -1686,7 +1988,59 @@
     }
     renderModelState();
     updateAgentContext();
-    setModelMessage(`已保存，AI 对话将使用 ${model || provider} 模型。`, "ok");
+    setModelMessage(`已保存，AI 对话将使用 ${model || provider} 模型（${protocol} 协议）。`, "ok");
+  }
+
+  /** 用一条极短请求验证「Base URL + 模型 + Key + 协议」是否真的可用。 */
+  async function testModelConnection() {
+    const provider = els.llmProvider.value;
+    const baseUrl = els.llmBaseUrl.value.trim();
+    const protocol = els.llmProtocol.value;
+    const model = els.llmModel.value.trim();
+    const apiKey = els.llmApiKey.value.trim();
+    if (!apiKey && !serverModelConfig) {
+      setModelMessage("请先填写 API Key 再测试连接。", "error");
+      return;
+    }
+    if (apiKey && !baseUrl) {
+      setModelMessage("请先填写 API Base URL（多数中转站需以 /v1 结尾）。", "error");
+      return;
+    }
+    const originalText = els.testModelConfig.textContent;
+    els.testModelConfig.disabled = true;
+    els.testModelConfig.textContent = "测试中…";
+    setModelMessage("正在连接模型接口，请稍候…");
+    try {
+      const data = await fetchJson(
+        "/llm/test",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(apiKey ? {
+            llm_provider: provider,
+            llm_base_url: baseUrl,
+            llm_protocol: protocol,
+            llm_model: model,
+            llm_api_key: apiKey,
+          } : {}),
+        },
+        60000,
+      );
+      if (data && data.ok) {
+        setModelMessage(
+          `连接成功：${data.protocol_label || data.protocol} · ${data.model || model} · ${data.latency_ms}ms` +
+            (data.endpoint ? ` · ${data.endpoint}` : ""),
+          "ok",
+        );
+      } else {
+        setModelMessage(`连接失败：${(data && data.error) || "未知错误"}`, "error");
+      }
+    } catch (error) {
+      setModelMessage(`连接失败：${error.message}`, "error");
+    } finally {
+      els.testModelConfig.disabled = false;
+      els.testModelConfig.textContent = originalText;
+    }
   }
 
   /** 清除本地模型配置，恢复服务端默认。 */
@@ -1699,7 +2053,7 @@
     fillModelForm(null);
     renderModelState();
     updateAgentContext();
-    setModelMessage("已清除本地配置。重新配置 API Key 后即可恢复 AI 对话。", "ok");
+    setModelMessage(serverModelConfig ? "已清除本地配置，恢复使用服务器默认模型。" : "已清除本地配置。重新配置 API Key 后即可恢复 AI 对话。", "ok");
   }
 
   function setModelMessage(message, kind = "") {
@@ -1715,6 +2069,7 @@
       previousProvider = next;
     });
     els.saveModelConfig.addEventListener("click", saveModelConfig);
+    els.testModelConfig.addEventListener("click", testModelConnection);
     els.clearModelConfig.addEventListener("click", clearModelConfig);
     fillModelForm(loadModelConfig());
     renderModelState();
@@ -1873,7 +2228,13 @@
       els.statusDot.classList.remove("is-offline");
       els.serviceState.textContent = `服务正常 · 默认 ${health.mock_mode ? "Mock" : "真实"} 模式 · ${cookieState}`;
 
-      if (health.auth_required) {
+      accountLoginEnabled = Boolean(health.login_required);
+      document.getElementById("accountLogout").hidden = !accountLoginEnabled;
+      if (accountLoginEnabled) {
+        const account = await fetchJson("/auth/me");
+        if (!account.authenticated) window.location.replace("/login");
+      }
+      if (health.auth_required && !accountLoginEnabled) {
         els.authSection.hidden = false;
         const valid = await ensureAuthSession();
         renderAuthState(valid);
@@ -1897,6 +2258,7 @@
         document.querySelectorAll(".tab-btn").forEach((item) => item.classList.remove("active"));
         button.classList.add("active");
         const target = document.getElementById(button.dataset.target);
+        if (button.dataset.target === "rawOutput") els.rawOutput.textContent = JSON.stringify(state.currentTask || {}, null, 2);
         ["summaryOutput", "transcriptOutput", "commentsOutput", "rawOutput"].forEach((id) => {
           const panel = document.getElementById(id);
           if (panel) {
@@ -1904,6 +2266,7 @@
           }
         });
         syncTranscriptToolbar();
+        syncResultActions();
       });
     });
   }
@@ -1965,6 +2328,7 @@
     els.linkMode.addEventListener("change", syncAnalysisModeUi);
     syncAnalysisModeUi();
     bindTabs();
+    bindResultActions();
     bindSidebarNav();
     bindDropZone();
 
@@ -2010,16 +2374,42 @@
 
     bindModelSettings();
     bindAuthSettings();
+    document.getElementById("accountLogout").addEventListener("click", async () => {
+      try {
+        await fetchJson("/auth/logout", { method: "POST" });
+        localStorage.removeItem(AUTH_TOKEN_KEY);
+        window.location.replace("/login");
+      } catch (error) {
+        window.alert(`退出失败：${error.message}`);
+      }
+    });
     bindThemeToggle();
   }
 
   /** 页面初始化。 */
   async function boot() {
+    const initialWatchVersion = state.watchVersion;
     bindEvents();
     updateAgentContext();
     await refreshServiceState();
-    await refreshCookieStatus();
-    await loadHistory();
+    try {
+      const config = await fetchJson("/config");
+      if (config.llm.configured) {
+        serverModelConfig = { provider: config.llm.provider, baseUrl: config.llm.base_url, model: config.llm.model, protocol: config.llm.protocol };
+        els.llmApiKey.placeholder = "留空使用服务器默认模型";
+        fillModelForm(loadModelConfig());
+        renderModelState();
+        setModelMessage("服务器默认模型已就绪，可直接分析和追问。填写自己的 Key 可覆盖默认模型。", "ok");
+        updateAgentContext();
+      }
+    } catch (error) { /* Service state already reports connection errors. */ }
+    await Promise.allSettled([refreshCookieStatus(), loadHistory()]);
+    try {
+      const saved = JSON.parse(localStorage.getItem(ACTIVE_TASK_KEY) || "null");
+      if (saved && saved.clientId === getClientId() && saved.taskId && state.watchVersion === initialWatchVersion) {
+        await openHistoryTask(saved.taskId);
+      }
+    } catch (error) { /* Storage may be disabled or contain an older value. */ }
   }
 
   boot();

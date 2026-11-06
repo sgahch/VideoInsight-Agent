@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
 
 from app.adapters.asr import MockTranscriber, ParaformerTranscriber, format_transcript
 from app.adapters.comment_fetcher import fetch_comments_for_url
+from app.comments_api import start_for_analysis
 from app.adapters.downloader import select_downloader
 from app.adapters.llm import MockLlmAnalyzer, OpenAICompatibleAnalyzer
 from app.config import Settings, settings
@@ -86,12 +88,29 @@ def _generate_output(
     transcript_plain: str,
     metadata: dict[str, str],
     comments_text: str | None = None,
+    on_output: Callable[[str], None] | None = None,
 ) -> str:
     if mode == AnalysisMode.transcript:
         # 文字稿模式直接返回原文，跳过 LLM 调用（省时省钱）
         return transcript_plain
     if llm is None:
         raise RuntimeError("AI 分析模式缺少 LLM 分析器。")
+    stream = getattr(llm, "analyze_stream", None)
+    if on_output is not None and callable(stream):
+        parts: list[str] = []
+        last_reported = perf_counter()
+        try:
+            for text in stream(
+                transcript_plain, mode, metadata=metadata,
+                include_timestamps=_INCLUDE_TIMESTAMPS_IN_PROMPT, comments_text=comments_text,
+            ):
+                parts.append(text)
+                if len(parts) == 1 or perf_counter() - last_reported >= 0.4:
+                    on_output("".join(parts))
+                    last_reported = perf_counter()
+        finally:
+            on_output("".join(parts))
+        return "".join(parts)
     return llm.analyze(
         transcript_plain,
         mode,
@@ -117,6 +136,7 @@ def _select_llm(
             base_url=request.llm_base_url,
             model=request.llm_model,
             api_key=request.llm_api_key,
+            protocol=request.llm_protocol,
         )
     return OpenAICompatibleAnalyzer(runtime_settings)
 
@@ -187,7 +207,10 @@ def generate_result_title(output: str, mode: AnalysisMode, fallback: str | None 
 def run_analysis_task(task_id: str, request: AnalyzeRequest, store: SQLiteTaskStore) -> None:
     store.set_running(task_id)
     try:
-        result = analyze(request, task_id, settings)
+        result = analyze(
+            request, task_id, settings,
+            on_update=lambda result: store.set_partial_result(task_id, result),
+        )
     except VideoInsightError as exc:
         store.set_failed(task_id, str(exc))
     except Exception as exc:  # Keep background task failures visible to API clients.
@@ -218,7 +241,10 @@ def run_file_analysis_task(
 ) -> None:
     store.set_running(task_id)
     try:
-        result = analyze_media_file(request, task_id, media_path, settings)
+        result = analyze_media_file(
+            request, task_id, media_path, settings,
+            on_update=lambda result: store.set_partial_result(task_id, result),
+        )
     except VideoInsightError as exc:
         store.set_failed(task_id, str(exc))
     except Exception as exc:
@@ -238,7 +264,43 @@ def run_file_analysis_task(
         drop_tracker(task_id)
 
 
-def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = settings) -> AnalysisResult:
+def _generate_live_output(
+    result: AnalysisResult,
+    llm: MockLlmAnalyzer | OpenAICompatibleAnalyzer | None,
+    transcript_plain: str,
+    metadata: dict[str, str],
+    on_update: Callable[[AnalysisResult], None] | None,
+    comments_text: str | None = None,
+) -> None:
+    last_saved = perf_counter()
+    if on_update:
+        on_update(result)
+
+    def publish(output: str) -> None:
+        nonlocal last_saved
+        result.output = output
+        # Persist checkpoints, not individual tokens; reconnects can resume from SQLite.
+        if on_update and perf_counter() - last_saved >= 0.4:
+            on_update(result)
+            last_saved = perf_counter()
+
+    try:
+        result.output = _generate_output(
+            llm, result.mode, transcript_plain, metadata,
+            comments_text=comments_text, on_output=publish if on_update else None,
+        )
+    finally:
+        if on_update:
+            on_update(result)
+
+
+def analyze(
+    request: AnalyzeRequest,
+    task_id: str,
+    runtime_settings: Settings = settings,
+    *,
+    on_update: Callable[[AnalysisResult], None] | None = None,
+) -> AnalysisResult:
     runtime_settings.ensure_dirs()
     use_mock = runtime_settings.mock_mode if request.use_mock is None else request.use_mock
     t0 = perf_counter()
@@ -257,7 +319,15 @@ def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = 
     # 但前端「观众评论」面板要展示，不能让用户对着空白发懵。
     comments: list[CommentItem] = []
     comments_source: str | None = None
-    if request.with_comments:
+    comment_job_id: str | None = None
+    if request.with_comments and runtime_settings.comment_crawler_url and not use_mock:
+        try:
+            comment_job = start_for_analysis(str(request.url), request.client_id, runtime_settings)
+            comment_job_id = comment_job["id"]
+            comments_source = "完整评论正在后台逐页抓取，可在评论中心查看进度和导出（包含子评论）。"
+        except Exception:
+            comments_source = "评论后台任务暂未启动，请在评论中心重试；视频分析继续。"
+    elif request.with_comments:
         comments, comments_source = fetch_comments_for_url(str(request.url), runtime_settings)
     comments_text = render_comments_block(comments) if comments else None
 
@@ -284,8 +354,6 @@ def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = 
 
     if reporter is not None:
         reporter.mark_analyzing()
-    output = _generate_output(llm, request.mode, transcript_plain, metadata, comments_text=comments_text)
-
     media_info = MediaInfo(
         audio_path=str(media.audio_path) if media.audio_path else None,
         title=media.title,
@@ -297,12 +365,13 @@ def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = 
         mode=request.mode,
         transcript=transcript,
         segments=segments,
-        output=output,
+        output="",
         media=media_info,
         comments=comments or None,
         diagnostics={
             "mock_mode": use_mock,
             "comments_source": comments_source,
+            "comment_job_id": comment_job_id,
             "comment_count": len(comments),
             "media_duration_seconds": round(media_duration, 2) if media_duration is not None else None,
             "transcribe_seconds": round(transcribe_seconds, 2),
@@ -314,7 +383,9 @@ def analyze(request: AnalyzeRequest, task_id: str, runtime_settings: Settings = 
             ),
         },
     )
-    result.title = generate_result_title(output, request.mode, fallback=media_info.title)
+    _generate_live_output(result, llm, transcript_plain, metadata, on_update, comments_text)
+    result.diagnostics["total_seconds"] = round(perf_counter() - t0, 2)
+    result.title = generate_result_title(result.output, request.mode, fallback=media_info.title)
     result_path = _write_result(runtime_settings.results_dir, task_id, result)
     result.artifacts["result_json"] = str(result_path)
     _write_result(runtime_settings.results_dir, task_id, result)
@@ -331,6 +402,8 @@ def analyze_media_file(
     task_id: str,
     media_path: Path,
     runtime_settings: Settings = settings,
+    *,
+    on_update: Callable[[AnalysisResult], None] | None = None,
 ) -> AnalysisResult:
     runtime_settings.ensure_dirs()
     use_mock = runtime_settings.mock_mode if request.use_mock is None else request.use_mock
@@ -370,8 +443,6 @@ def analyze_media_file(
     )
     if reporter is not None:
         reporter.mark_analyzing()
-    output = _generate_output(llm, request.mode, transcript_plain, metadata)
-
     media_info = MediaInfo(
         audio_path=str(media_path),
         title=media_path.name,
@@ -383,7 +454,7 @@ def analyze_media_file(
         mode=request.mode,
         transcript=transcript,
         segments=segments,
-        output=output,
+        output="",
         media=media_info,
         diagnostics={
             "mock_mode": use_mock,
@@ -398,7 +469,9 @@ def analyze_media_file(
             ),
         },
     )
-    result.title = generate_result_title(output, request.mode, fallback=media_info.title)
+    _generate_live_output(result, llm, transcript_plain, metadata, on_update)
+    result.diagnostics["total_seconds"] = round(perf_counter() - t0, 2)
+    result.title = generate_result_title(result.output, request.mode, fallback=media_info.title)
     result_path = _write_result(runtime_settings.results_dir, task_id, result)
     result.artifacts["result_json"] = str(result_path)
     _write_result(runtime_settings.results_dir, task_id, result)

@@ -1,7 +1,7 @@
 """观众评论抓取适配层。
 
 两条数据来源：
-1. **抖音内置直连**（默认，零依赖）：`www.iesdouyin.com/web/api/v2/comment/list/`
+1. **抖音内置直连**（未配置其他源时兜底，零依赖）：`www.iesdouyin.com/web/api/v2/comment/list/`
    实测仍开放——不需要 cookies、不需要 a_bogus 签名，返回热门评论
    （固定约 10 条，count/cursor 参数均无效；二级回复接口在 v2 下已下线）。
    注意 web 端 `www.douyin.com/aweme/v1/web/comment/list/` 与 detail 接口一样
@@ -21,7 +21,7 @@ import csv
 import json
 import re
 import sqlite3
-import time
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -98,23 +98,23 @@ class CommentBackend(Protocol):
 def _row_to_comment(row: dict[str, str]) -> CommentItem | None:
     """把一行原始评论字段映射为归一化 CommentItem；缺 comment_id 则丢弃。"""
     norm = {str(k).strip().lower(): v for k, v in row.items()}
-    comment_id = (norm.get("comment_id") or "").strip()
+    comment_id = str(norm.get("comment_id") or "").strip()
     if not comment_id:
         return None
-    content = (norm.get("content") or norm.get("message") or norm.get("comment") or "").strip()
+    content = str(norm.get("content") or norm.get("message") or norm.get("comment") or "").strip()
     try:
         like_count = int(str(norm.get("like_count") or norm.get("like") or 0).strip() or 0)
     except ValueError:
         like_count = 0
     return CommentItem(
         comment_id=comment_id,
-        parent_comment_id=(norm.get("parent_comment_id") or norm.get("parent") or "").strip() or None,
+        parent_comment_id=str(norm.get("parent_comment_id") or norm.get("parent") or "").strip() or None,
         content=content,
-        author_nickname=(
-            norm.get("nickname") or norm.get("user_name") or norm.get("uname") or norm.get("name") or ""
+        author_nickname=str(
+            norm.get("author_nickname") or norm.get("nickname") or norm.get("user_name") or norm.get("uname") or norm.get("name") or ""
         ).strip() or None,
         like_count=like_count,
-        create_time=(norm.get("create_time") or norm.get("ctime") or norm.get("add_ts") or "").strip() or None,
+        create_time=str(norm.get("create_time") or norm.get("ctime") or norm.get("add_ts") or "").strip() or None,
     )
 
 
@@ -326,14 +326,14 @@ class DouyinCommentFetcher:
                     content=str(item.get("text") or "").strip(),
                     author_nickname=(str(author.get("nickname") or "").strip() or None),
                     like_count=like_count,
-                    create_time=_format_timestamp(item.get("createTime")),
+                    create_time=_format_timestamp(item.get("create_time") or item.get("createTime")),
                 )
             )
         return _dedupe(comments)
 
 
 def _format_timestamp(value: object) -> str | None:
-    """抖音 createTime 是 Unix 秒；转成本地可读时间，失败返回 None。"""
+    """抖音 Unix 秒转换为带时区的 ISO 时间，失败返回 None。"""
     try:
         seconds = int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
@@ -341,7 +341,7 @@ def _format_timestamp(value: object) -> str | None:
     if seconds <= 0:
         return None
     try:
-        return time.strftime("%Y-%m-%d %H:%M", time.localtime(seconds))
+        return datetime.fromtimestamp(seconds).astimezone().isoformat()
     except (OverflowError, OSError, ValueError):
         return None
 
@@ -416,14 +416,14 @@ def fetch_comments_for_url(
         mc_platform = mc_platform or "bili"
         video_id = video_id or "mock-id"
 
-    # 抖音走内置直连接口（零依赖）；其余平台只能靠 MediaCrawler。
+    # 已配置的数据源可能包含完整分页和回复，应优先于直连热门样本。
     candidates: list[tuple[str, CommentBackend]] = []
+    if fetcher is not None:
+        candidates.append((f"MediaCrawler::{mc_platform}/{video_id}", fetcher))
     if mc_platform == "dy":
         candidates.append(
             (f"抖音评论接口::{video_id}", DouyinCommentFetcher())  # type: ignore[arg-type]
         )
-    if fetcher is not None:
-        candidates.append((f"MediaCrawler::{mc_platform}/{video_id}", fetcher))
     if not candidates:
         return [], (
             "未配置评论数据源：抖音走内置接口，其他平台需设置 "

@@ -16,6 +16,7 @@ from time import sleep
 import httpx
 
 from app.adapters.audio import resolve_ffmpeg
+from app.adapters.bilibili import is_bilibili_video_url, resolve_bilibili_info
 from app.config import Settings, settings
 from app.errors import ExternalDependencyError, WorkflowError
 
@@ -87,9 +88,10 @@ class YtDlpDownloader:
             output_template,
         ]
         cookies_file = resolve_cookies_file(settings)
+        input_args = self._input_args(url, task_dir, cookies_file)
         # 传入可调用对象：每次尝试前重新暂存 cookies，这样浏览器刷新 cookies 后重试才生效。
         completed = _run_yt_dlp_with_cookie_recovery(
-            lambda: [*cmd_base, *_cookie_args(cookies_file, task_dir), url]
+            lambda: [*cmd_base, *_cookie_args(cookies_file, task_dir), *input_args]
         )
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
@@ -141,8 +143,9 @@ class YtDlpDownloader:
             output_template,
         ]
         cookies_file = resolve_cookies_file(settings)
+        input_args = self._input_args(url, task_dir, cookies_file)
         completed = _run_yt_dlp_with_cookie_recovery(
-            lambda: [*cmd_base, *_cookie_args(cookies_file, task_dir), url]
+            lambda: [*cmd_base, *_cookie_args(cookies_file, task_dir), *input_args]
         )
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
@@ -156,6 +159,15 @@ class YtDlpDownloader:
         if not candidates:
             raise WorkflowError("源视频下载完成，但没有生成 mp4 文件。")
         return candidates[0]
+
+    @staticmethod
+    def _input_args(url: str, task_dir: Path, cookies_file: Path | None) -> list[str]:
+        if not is_bilibili_video_url(url):
+            return [url]
+        info = resolve_bilibili_info(url, _cookie_args(cookies_file, task_dir))
+        info_file = task_dir / ".bilibili-source.json"
+        info_file.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        return ["--load-info-json", str(info_file)]
 
     @staticmethod
     def _yt_dlp_command() -> list[str] | None:

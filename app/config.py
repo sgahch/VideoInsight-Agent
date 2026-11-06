@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,14 +44,18 @@ class Settings:
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
     llm_base_url: str = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
     llm_model: str = os.getenv("LLM_MODEL", "deepseek-chat")
+    # 服务端默认接口协议：chat_completions（默认）/ responses / messages
+    llm_protocol: str = os.getenv("LLM_PROTOCOL", "chat_completions")
     ytdlp_cookies_file: Path | None = (
         Path(os.environ["YTDLP_COOKIES_FILE"]) if os.getenv("YTDLP_COOKIES_FILE") else None
     )
     ytdlp_cookies_from_browser: str | None = os.getenv("YTDLP_COOKIES_FROM_BROWSER") or None
-    # ---- MediaCrawler 评论爬虫对接（可选）----
-    # 方式一：指向 MediaCrawler 服务地址（其 api 在 :8080），用于按接口拉评论（端点待核实，默认走方式二）。
+    # MediaCrawler-backed background jobs use our authenticated comment service.
+    # The legacy file/API adapters below remain available for imported samples.
     media_crawler_api_url: str | None = os.getenv("MEDIA_CRAWLER_API_URL") or None
-    # 方式二（推荐）：指向 MediaCrawler 的 data/ 输出目录，本项目直接读取它落盘的评论文件。
+    comment_crawler_url: str | None = os.getenv("COMMENT_CRAWLER_URL") or None
+    comment_crawler_token: str | None = os.getenv("COMMENT_CRAWLER_TOKEN") or None
+    # Optional legacy adapter: read MediaCrawler's exported comment files.
     media_crawler_output_dir: Path | None = (
         Path(os.environ["MEDIA_CRAWLER_OUTPUT_DIR"]) if os.getenv("MEDIA_CRAWLER_OUTPUT_DIR") else None
     )
@@ -66,6 +71,9 @@ class Settings:
     # 共享访问令牌。未设置（默认）时不做任何鉴权校验，本地行为与之前一致；
     # 设置后除 /、/static、/health、/auth/session 外的所有请求都必须带令牌。
     auth_token: str | None = os.getenv("VIDEOINSIGHT_AUTH_TOKEN") or None
+    auth_username: str = os.getenv("VIDEOINSIGHT_AUTH_USERNAME", "ynchen")
+    auth_password_hash: str | None = os.getenv("VIDEOINSIGHT_AUTH_PASSWORD_HASH") or None
+    auth_session_secret: str = os.getenv("VIDEOINSIGHT_SESSION_SECRET") or secrets.token_urlsafe(48)
     # 任务记录的保留时长；<=0（默认）表示不按时间淘汰历史，只回收孤儿目录。
     # 刻意默认关闭：静默删除用户的历史记录比占点磁盘更糟。
     task_retention_hours: int = int(os.getenv("VIDEOINSIGHT_TASK_RETENTION_HOURS", "0"))

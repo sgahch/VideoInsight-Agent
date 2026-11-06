@@ -78,7 +78,7 @@ python cli.py "https://example.com/video" --mode interview
 |---|---|---|
 | 🎵 抖音 | 内置 `DouyinShareDownloader`（移动分享页 SSR + 无水印直链） | 需要 `ttwid`（见下方说明） |
 | ⚡ 快手 | 内置 `KuaishouDownloader`（移动端分享页解析） | 否 |
-| 📺 B站 | yt-dlp | 否 |
+| 📺 B站 | 详情/播放 API 解析 + yt-dlp 下载音视频流 | 公开视频通常不需要；权限视频需对应登录态 |
 | 📕 小红书 | yt-dlp | 否 |
 | 🌐 其他 | yt-dlp 通用提取 | 视平台而定 |
 
@@ -86,26 +86,50 @@ python cli.py "https://example.com/video" --mode interview
 > yt-dlp 的抖音提取器走 `www.douyin.com/aweme/v1/web/aweme/detail/`，该接口已强制 `a_bogus` 签名校验
 > （yt-dlp 至 2026.08.19 仍未实现，源码仅留 TODO），**即使 Cookies 齐全也一律 403**，
 > 报 `Fresh cookies are needed` —— 反复重新登录是无效的。
+
+> **B 站 HTTP 412**：普通视频及 `b23.tv` 分享短链通过详情和播放 API 解析，
+> 再将音视频流交给 yt-dlp 下载，避免访问被风控的视频 HTML。支持 BV/av 链接和 `?p=2` 分 P。
+> 详情接口被 412 拦截时自动改用分 P 接口取得标题、时长和播放编号；此时无法取得的 UP 主信息留空。
+> 如 API 也触发风控，页面会提示稍后重试、上传 B 站 Cookies 或上传本地视频。
 > 本项目改走 `m.douyin.com` 移动分享页：SSR 数据里直接内嵌视频地址，再拼无水印直链下载。
 
 ---
 
 ## 💬 观众评论
 
-抖音评论通过内置直连接口抓取，**不需要部署任何爬虫、不需要浏览器、不需要登录态**。
+评论分为独立评论中心和旧版分析内嵌评论两条链路：
 
 ```text
-抖音内置接口（iesdouyin v2）  →  失败时才降级  →  MediaCrawler（需另行部署）
+配置 COMMENT_CRAWLER_URL + COMMENT_CRAWLER_TOKEN → 后台评论任务 → 评论中心
+未配置独立服务 → 优先读取配置的 MediaCrawler 评论源 → 抖音热门样本兜底
 ```
 
-⚠️ **已知限制**
+- **评论中心 `/comments`**：支持后台分页采集一级评论和子评论、去重、断点续抓；
+  支持按点赞数、发布时间和入库顺序排序，筛选一级/全部/仅子评论，展开楼层回复。
+- **热评前 10**：从当前任务已采集、符合范围筛选的所有评论中按点赞数选取，
+  不是仅对当前页排序，也不等于平台推荐热榜；未抓完时排名仍可能变化。
+- **导出**：保留全量 JSONL 导出，另可按当前筛选导出（包括前 10 条）。
+- **分析内嵌评论**：已有数据同样支持排序、范围筛选和前 10；
+  配置独立服务时通过链接进入评论中心，首次视频总结不等待后台评论。
 
-- 接口固定返回**约 10 条热门评论**，`count` / `cursor` 参数均无效，无法翻页。
-- 只有**一级评论**；楼中楼回复接口在 v2 下已下线。
-- 仅抖音内置。B站 / 快手等平台需自行部署 [MediaCrawler](https://github.com/NanmiCoder/MediaCrawler)，
-  并配置 `MEDIA_CRAWLER_OUTPUT_DIR` 或 `MEDIA_CRAWLER_API_URL`。
+旧版抖音直连在项目既有验证中仅返回约 10 条一级热门样本，不提供可用分页及回复。
+界面会明确标注样本范围，修改 `count` 不能让它变成完整评论区。
+获取更多评论需部署独立评论服务并提供有效的平台登录态，参见 [部署说明](deploy/comments.md)。
+采集范围仅限当前账号可见、平台接口实际返回的内容；无法恢复已删除、隐藏或权限受限的评论。
 
-评论抓取失败只会静默降级，**绝不阻断**主分析链路。
+本机接入 MediaCrawler（Git、uv、Node.js 已安装，无需 Docker）：
+
+```powershell
+.\.venv\Scripts\python.exe -m crawler_service.manage install
+.\.venv\Scripts\python.exe -m crawler_service.manage start
+```
+
+安装器使用固定源码版本及独立 `.venv-comments`，完成四平台接口和 Chromium 自检后配置 `.env`。
+重启主应用，在 `/comments` 导入平台 Cookies 后创建抓取任务。Windows `restart.bat`
+会自动启动已安装的评论服务；`python -m crawler_service.manage check` 可再次自检。
+上游使用非商业学习许可，商业化前须先确认授权。
+
+评论抓取失败不会阻断主分析链路；后台任务保留已采集内容和状态。
 
 ---
 

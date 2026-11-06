@@ -23,8 +23,9 @@ import logging
 import secrets
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from app.account_auth import authenticated, login_required
 from app.config import settings
 
 
@@ -38,8 +39,8 @@ AUTH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60
 # - "/" 与 /static：页面本身和它的 JS/CSS 得先加载出来，才能让用户输入令牌
 # - /health：探活
 # - /auth/session：它自己负责校验令牌并换成 Cookie
-PUBLIC_PATHS = frozenset({"/", "/health", "/auth/session"})
-PUBLIC_PREFIXES = ("/static",)
+PUBLIC_PATHS = frozenset({"/", "/login", "/health", "/auth/session", "/auth/login", "/auth/logout", "/auth/me"})
+PUBLIC_PREFIXES = ("/static/",)
 
 UNAUTHORIZED_DETAIL = "未授权：缺少或无效的访问令牌。"
 
@@ -65,17 +66,20 @@ def token_matches(provided: str | None, expected: str) -> bool:
     if not provided:
         return False
     # 常量时间比较：普通 == 会在第一个不同字节处提前返回，理论上有计时侧信道。
-    return secrets.compare_digest(provided, expected)
+    return secrets.compare_digest(provided.encode(), expected.encode())
 
 
 async def auth_middleware(request: Request, call_next) -> Response:
     """未配置令牌 → 全放行；配置了 → 默认拒绝 + 白名单。"""
     expected = settings.auth_token
-    if expected is None:
+    account_enabled = login_required()
+    if account_enabled and request.url.path in {"/", "/comments"} and not authenticated(request):
+        return RedirectResponse("/login", status_code=303)
+    if expected is None and not account_enabled:
         return await call_next(request)
     if is_public_path(request.url.path):
         return await call_next(request)
-    if token_matches(extract_token(request), expected):
+    if authenticated(request) or (expected is not None and token_matches(extract_token(request), expected)):
         return await call_next(request)
     LOGGER.warning("拒绝未授权请求：%s %s", request.method, request.url.path)
     return JSONResponse(status_code=401, content={"detail": UNAUTHORIZED_DETAIL})

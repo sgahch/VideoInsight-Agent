@@ -1,5 +1,10 @@
 # 运行 MediaCrawler 产出评论数据（VideoInsight 对接手册）
 
+> 日常使用请优先按 [评论服务部署与验证](../deploy/comments.md) 安装后台评论服务：
+> `.\.venv\Scripts\python.exe -m crawler_service.manage install`，
+> 再执行 `python -m crawler_service.manage start`。它支持持续分页、子评论、断点续抓和评论中心排序。
+> 本文以下保留为“离线文件导入”的备选方案，不是实时抓取服务。
+
 > 本文件是 `docs/MediaCrawler集成评估.md` 的**落地操作手册**。
 > 目标：让 MediaCrawler 作为**独立评论服务**跑起来，把评论落盘，VideoInsight 自动按视频 ID 关联并喂给同一个 LLM。
 > 评估里的「非商业学习许可」「ToS/风控」约束依然生效，先读评估文档。
@@ -43,7 +48,9 @@ playwright install # 仅标准 Playwright 模式需要；用 CDP 模式可跳过
 编辑 `MediaCrawler/config/base_config.py`：
 
 ```python
-ENABLE_GET_COMMENTS = True        # 关键：默认是关的，必须开
+ENABLE_GET_COMMENTS = True
+ENABLE_GET_SUB_COMMENTS = True    # 上游默认关闭楼中楼
+CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES = 10000  # 根据采集范围设置；上游默认仅 10 条
 SAVE_DATA_OPTION = "csv"          # 推荐 csv 或 json；VideoInsight 都认
 # 想爬的平台的开关按需开启（默认大多已开）
 ```
@@ -127,6 +134,6 @@ MediaCrawler 落盘的每行 → VideoInsight `CommentItem`：
 
 - **ToS / 风控**：各平台限制自动化抓取；控制频率、别大规模爬，避免封号。掉登录态要重扫。
 - **许可红线**：`NON-COMMERCIAL LEARNING LICENSE 1.1`，仅限非商业学习用途；商业化前必须换合规数据源（如各平台开放 API / 付费数据服务）。
-- **评论默认关闭**：别忘了 `ENABLE_GET_COMMENTS = True`。
+- **默认范围有限**：检查评论条数上限和 `ENABLE_GET_SUB_COMMENTS`；后台服务不使用上游的 10 条上限。
 - **字段差异**：各平台评论字段名/层级略有不同，归一化层已做别名兼容，但新平台接入前建议抽样核对一次。
 - **不是核心路径**：评论是「可选增强」。任何抓取失败都降级为纯字幕分析，不会拖垮主功能。

@@ -1,0 +1,15 @@
+.git
+.env
+.venv
+.serena
+.workbuddy*
+data
+media
+docs
+tests
+__pycache__
+*.pyc
+*.log
+*.txt
+!requirements.txt
+!requirements-asr.txt

@@ -5,7 +5,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>VideoInsight Agent - 沉浸式 AI 视频分析平台</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260905-1" />
+  <link rel="stylesheet" href="/static/styles.css?v=20261105-platforms1" />
 </head>
 
 <body>
@@ -35,6 +35,9 @@
         <a href="#agent" class="sidebar-nav-item">
           <span>🤖</span> AI Agent 助手
         </a>
+        <a href="/comments" class="sidebar-nav-item">
+          <span>💬</span> 评论中心
+        </a>
         <a href="#cookies" class="sidebar-nav-item">
           <span>🔑</span> Cookies 授权
         </a>
@@ -42,6 +45,8 @@
           <span>⚙️</span> 模型设置
         </a>
       </nav>
+
+      <button id="accountLogout" class="btn btn-secondary" type="button" hidden>退出登录</button>
 
       <!-- 主题切换 -->
       <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px;">
@@ -79,6 +84,28 @@
 
       <!-- 核心分析工作台 Grid (移动端自动折叠为单列) -->
       <section id="workspace" class="workspace-grid">
+
+        <div class="platform-showcase" aria-labelledby="supportedPlatformsTitle">
+          <h2 id="supportedPlatformsTitle" class="platform-showcase-title">支持平台</h2>
+          <ul class="platform-showcase-list" role="list">
+            <li class="platform-showcase-item">
+              <img src="/static/assets/platforms/douyin.ico" width="36" height="36" alt="" />
+              <span>抖音</span>
+            </li>
+            <li class="platform-showcase-item">
+              <img src="/static/assets/platforms/bilibili.ico" width="36" height="36" alt="" />
+              <span>哔哩哔哩</span>
+            </li>
+            <li class="platform-showcase-item">
+              <img src="/static/assets/platforms/kuaishou.ico" width="36" height="36" alt="" />
+              <span>快手</span>
+            </li>
+            <li class="platform-showcase-item">
+              <img src="/static/assets/platforms/xiaohongshu.png" width="36" height="36" alt="" />
+              <span>小红书</span>
+            </li>
+          </ul>
+        </div>
 
         <!-- 上传卡片 -->
         <div class="card-panel">
@@ -222,12 +249,19 @@
           </div>
         </div>
 
-        <!-- 结果切换 Segmented Tabs -->
-        <div class="tab-nav" role="tablist" aria-label="结果视图">
-          <button class="tab-btn active" data-target="summaryOutput" type="button" role="tab">AI 总结</button>
-          <button class="tab-btn" data-target="transcriptOutput" type="button" role="tab">逐字稿</button>
-          <button class="tab-btn" data-target="commentsOutput" type="button" role="tab">观众评论</button>
-          <button class="tab-btn" data-target="rawOutput" type="button" role="tab">JSON 原文</button>
+        <!-- 结果切换 Segmented Tabs + 视图操作 -->
+        <div class="result-bar">
+          <div class="tab-nav" role="tablist" aria-label="结果视图">
+            <button class="tab-btn active" data-target="summaryOutput" type="button" role="tab">AI 总结</button>
+            <button class="tab-btn" data-target="transcriptOutput" type="button" role="tab">逐字稿</button>
+            <button class="tab-btn" data-target="commentsOutput" type="button" role="tab">观众评论</button>
+            <button class="tab-btn" data-target="rawOutput" type="button" role="tab">JSON 原文</button>
+          </div>
+          <div class="result-bar-actions">
+            <button id="copyPanelBtn" class="mini-btn result-action" type="button" title="复制当前视图的完整内容">复制</button>
+            <button id="expandPanelBtn" class="mini-btn result-action" type="button" title="展开 / 收起完整内容"
+              aria-pressed="false">展开全文</button>
+          </div>
         </div>
 
         <!-- 输出显示框 -->
@@ -340,7 +374,7 @@
         </div>
 
         <p class="settings-note">
-          仅 <strong>AI 智能总结、面试/观点提取和 AI 对话</strong>需要配置模型；逐字稿提取无需 API Key。
+          服务器配置默认模型后可直接使用；也可以填写自己的 API Key。逐字稿提取无需配置模型。
         </p>
 
         <div class="privacy-tip">
@@ -368,6 +402,17 @@
           <div class="form-group" id="baseUrlGroup">
             <label class="form-label" for="llmBaseUrl">API Base URL</label>
             <input id="llmBaseUrl" type="url" class="form-input" placeholder="https://api.deepseek.com/v1" />
+            <p class="form-hint">中转站地址请填到 <code>/v1</code>（如 https://api.xxx.com/v1）；漏掉 /v1 会请求到站点首页导致「无法解析的响应」。</p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="llmProtocol">接口协议</label>
+            <select id="llmProtocol" class="form-select">
+              <option value="chat_completions">Chat Completions（/chat/completions）</option>
+              <option value="responses">Responses（/responses）</option>
+              <option value="messages">Anthropic Messages（/messages）</option>
+            </select>
+            <p class="form-hint">默认 Chat Completions。若中转站只提供 Responses 或 Claude 原生 Messages 端点，切换到对应协议。</p>
           </div>
 
           <div class="form-group">
@@ -383,6 +428,7 @@
           <div class="flex-between">
             <span id="modelMessage" class="cookie-message"></span>
             <div style="display: flex; gap: 10px;">
+              <button id="testModelConfig" class="btn btn-secondary" type="button">测试连接</button>
               <button id="clearModelConfig" class="btn btn-secondary" type="button">清除</button>
               <button id="saveModelConfig" class="btn" type="button">保存配置</button>
             </div>
@@ -420,7 +466,8 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=20260918-1"></script>
+  <script src="/static/comment-utils.js?v=20261105"></script>
+  <script src="/static/app.js?v=20261105-comments-perf1"></script>
 </body>
 
 </html>

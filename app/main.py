@@ -5,13 +5,16 @@ import logging
 from contextlib import asynccontextmanager, suppress
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Cookie, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.cleanup import remove_task_artifacts, run_cleanup
 from app.config import settings
+from app.account_auth import login_required, router as account_router
+from app.comments_api import router as comments_router
 from app.adapters.asr import format_transcript
 from app.adapters.downloader import YtDlpDownloader, default_cookies_file, resolve_cookies_file, select_downloader
 from app.adapters.llm import MockLlmAnalyzer, OpenAICompatibleAnalyzer
@@ -28,9 +31,11 @@ from app.schemas import (
     AuthSessionRequest,
     ChatRequest,
     ChatResponse,
+    LlmTestRequest,
     ParseLinkRequest,
     TaskRecord,
     TaskStatus,
+    TaskSummary,
 )
 from app.security import (
     AUTH_COOKIE_MAX_AGE,
@@ -42,6 +47,7 @@ from app.task_store import task_store
 from app.task_queue import PendingTask, TaskQueue, reconcile_interrupted_tasks
 from app.workflow import detect_platform, format_duration, run_analysis_task, run_file_analysis_task
 from app.progress import get_snapshot
+from app.streaming import STREAM_HEADERS, encode_event
 
 
 LOGGER = logging.getLogger(__name__)
@@ -209,6 +215,8 @@ async def persist_client_session(request: Request, call_next):
 # 放在 persist_client_session 之后注册 —— Starlette 里后注册的中间件在最外层，
 # 因此鉴权会先于其他任何处理执行，未授权请求不会走到业务逻辑。
 app.middleware("http")(auth_middleware)
+app.include_router(account_router)
+app.include_router(comments_router)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = PROJECT_ROOT / "web"
@@ -231,15 +239,17 @@ def health() -> dict[str, object]:
         "status": "ok",
         "mock_mode": settings.mock_mode,
         # 前端据此决定是否要求用户填访问令牌
-        "auth_required": settings.auth_token is not None,
+        "auth_required": settings.auth_token is not None or login_required(),
+        "login_required": login_required(),
         "tmp_dir": str(settings.tmp_dir),
         "results_dir": str(settings.results_dir),
         "media_dir": str(settings.media_dir),
         "cookies_file": bool(resolve_cookies_file(settings)),
         "cookies_from_browser": settings.ytdlp_cookies_from_browser,
-        # 抖音走内置直连接口，始终可用；其他平台才依赖 MediaCrawler 配置。
+        # Report configuration only; platform access is checked by each crawl job.
         "comment_source": (
-            "douyin-builtin+api" if settings.media_crawler_api_url
+            "mediacrawler-service" if settings.comment_crawler_url and settings.comment_crawler_token
+            else "douyin-builtin+api" if settings.media_crawler_api_url
             else "douyin-builtin+file" if settings.media_crawler_output_dir
             else "douyin-builtin"
         ),
@@ -255,6 +265,8 @@ def create_auth_session(payload: AuthSessionRequest, response: Response) -> dict
     """
     expected = settings.auth_token
     if expected is None:
+        if login_required():
+            raise HTTPException(status_code=401, detail="请使用账号密码登录。")
         return {"authenticated": True, "auth_required": False}
     if not token_matches(payload.token, expected):
         raise HTTPException(status_code=401, detail="访问令牌不正确。")
@@ -272,6 +284,14 @@ def create_auth_session(payload: AuthSessionRequest, response: Response) -> dict
 def delete_auth_session(response: Response) -> dict[str, object]:
     response.delete_cookie(AUTH_COOKIE_NAME)
     return {"authenticated": False}
+
+
+@app.get("/config")
+def public_model_config() -> dict[str, object]:
+    """Authenticated UI configuration; credentials never leave the server."""
+    provider = settings.llm_provider.lower()
+    key = settings.deepseek_api_key if provider == "deepseek" else settings.openai_api_key if provider == "openai" else settings.deepseek_api_key or settings.openai_api_key
+    return {"llm": {"configured": bool(key) and provider != "mock", "provider": provider, "base_url": settings.llm_base_url, "model": settings.llm_model, "protocol": settings.llm_protocol}}
 
 
 @app.post("/parse-link")
@@ -318,6 +338,7 @@ def submit_file_analysis(
     llm_base_url: str | None = Form(None),
     llm_model: str | None = Form(None),
     llm_api_key: str | None = Form(None),
+    llm_protocol: str | None = Form(None),
     x_client_id: str | None = Header(default=None, description="客户端身份标识（浏览器持久化 UUID）"),
 ) -> AnalyzeResponse:
     request = AnalyzeRequest(
@@ -329,6 +350,7 @@ def submit_file_analysis(
         llm_base_url=llm_base_url,
         llm_model=llm_model,
         llm_api_key=llm_api_key,
+        llm_protocol=llm_protocol,
     )
     task = task_store.create(request)
     try:
@@ -409,13 +431,15 @@ def capture_browser_cookies() -> dict[str, object]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/tasks", response_model=list[TaskRecord])
+@app.get("/tasks", response_model=list[TaskRecord] | list[TaskSummary])
 def list_tasks(
     status: TaskStatus | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     x_client_id: str | None = Header(default=None, description="客户端身份标识（浏览器持久化 UUID）"),
-) -> list[TaskRecord]:
-    return task_store.list_tasks(
+    view: Literal["full", "summary"] = "full",
+) -> list[TaskRecord] | list[TaskSummary]:
+    listing = task_store.list_summaries if view == "summary" else task_store.list_tasks
+    return listing(
         limit=limit,
         status=status,
         client_id=_client_id_from_header(x_client_id),
@@ -446,6 +470,43 @@ def get_task(
     return task
 
 
+@app.get("/tasks/{task_id}/events")
+def task_events(
+    task_id: str,
+    x_client_id: str | None = Header(default=None),
+) -> StreamingResponse:
+    initial = get_task(task_id, x_client_id)
+
+    async def events():
+        task = initial
+        transcript: str | None = None
+        output = ""
+        first = True
+        while True:
+            if task.status in (TaskStatus.succeeded, TaskStatus.failed):
+                yield encode_event("complete", task.model_dump(mode="json"))
+                return
+            current_transcript = task.result.transcript if task.result else None
+            current_output = task.result.output if task.result else ""
+            if first or current_transcript != transcript or not current_output.startswith(output):
+                yield encode_event("snapshot", task.model_dump(mode="json"))
+                transcript, output, first = current_transcript, current_output, False
+            else:
+                if current_output != output:
+                    yield encode_event("delta", {"text": current_output[len(output):]})
+                    output = current_output
+                progress = task.model_dump(mode="json", exclude={"result", "request", "error"})
+                yield encode_event("progress", progress)
+            await asyncio.sleep(0.5)
+            try:
+                task = await asyncio.to_thread(get_task, task_id, x_client_id)
+            except HTTPException as exc:
+                yield encode_event("error", {"detail": exc.detail, "status": exc.status_code})
+                return
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers=STREAM_HEADERS)
+
+
 @app.delete("/tasks/{task_id}", status_code=204)
 def delete_task(
     task_id: str,
@@ -469,6 +530,15 @@ def chat_with_task(
     优先使用请求中携带的用户自备模型配置（llm_api_key 等）；
     未提供时回退到服务器 Settings 配置（真实或 Mock）。
     """
+    llm, question, transcript, metadata = _prepare_task_chat(task_id, request, x_client_id)
+    try:
+        answer = llm.chat(question, transcript, metadata=metadata)
+    except VideoInsightError as exc:
+        raise HTTPException(status_code=502, detail=f"AI 对话失败：{exc}") from exc
+    return ChatResponse(answer=answer)
+
+
+def _prepare_task_chat(task_id: str, request: ChatRequest, x_client_id: str | None):
     question = request.question.strip()
     if not question:
         raise HTTPException(status_code=422, detail="请输入要提问的内容。")
@@ -492,15 +562,58 @@ def chat_with_task(
             base_url=request.llm_base_url,
             model=request.llm_model,
             api_key=request.llm_api_key,
+            protocol=request.llm_protocol,
         )
     else:
         llm = MockLlmAnalyzer() if use_mock else OpenAICompatibleAnalyzer(settings)
-    metadata = _chat_metadata(task.result)
+    return llm, question, transcript, _chat_metadata(task.result)
+
+
+@app.post("/tasks/{task_id}/chat/stream")
+def stream_task_chat(
+    task_id: str,
+    request: ChatRequest,
+    x_client_id: str | None = Header(default=None),
+) -> StreamingResponse:
+    llm, question, transcript, metadata = _prepare_task_chat(task_id, request, x_client_id)
+
+    def events():
+        try:
+            for text in llm.chat_stream(question, transcript, metadata=metadata):
+                yield encode_event("delta", {"text": text})
+            yield encode_event("done", {})
+        except VideoInsightError as exc:
+            yield encode_event("error", {"detail": f"AI 对话失败：{exc}"})
+        except Exception:
+            LOGGER.exception("AI chat stream failed for task %s", task_id)
+            yield encode_event("error", {"detail": "AI 对话暂时中断，请稍后重试。"})
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers=STREAM_HEADERS)
+
+
+@app.post("/llm/test")
+def test_llm_config(request: LlmTestRequest) -> dict[str, object]:
+    """模型配置连通性自检：用一条极短请求验证 Base URL / 模型 / Key / 协议是否可用。
+
+    不写入任何任务记录，Key 用完即弃（与对话链路一致，服务端不保存）。
+    """
+    if not request.llm_api_key.strip() and not public_model_config()["llm"]["configured"]:
+        raise HTTPException(status_code=422, detail="请先填写 API Key。")
+    llm = OpenAICompatibleAnalyzer(
+        settings,
+        provider=request.llm_provider,
+        base_url=request.llm_base_url,
+        model=request.llm_model,
+        api_key=request.llm_api_key,
+        protocol=request.llm_protocol,
+    ) if request.llm_api_key.strip() else OpenAICompatibleAnalyzer(settings)
     try:
-        answer = llm.chat(question, transcript, metadata=metadata)
+        result = llm.probe()
     except VideoInsightError as exc:
-        raise HTTPException(status_code=502, detail=f"AI 对话失败：{exc}") from exc
-    return ChatResponse(answer=answer)
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - 自检接口要把任何异常转成可读结果
+        return {"ok": False, "error": f"连接失败：{exc}"}
+    return result
 
 
 def _task_transcript(result: AnalysisResult) -> str:

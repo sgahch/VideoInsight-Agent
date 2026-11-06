@@ -291,6 +291,24 @@ def test_format_timestamp_handles_garbage():
     assert _format_timestamp(1754000000) is not None
 
 
+def test_format_timestamp_retains_timezone_and_exact_instant():
+    from datetime import datetime
+    assert datetime.fromisoformat(_format_timestamp(1754000000)).timestamp()==1754000000
+
+
+def test_media_crawler_json_accepts_numeric_fields_and_normalized_nickname(tmp_path):
+    path=tmp_path/"123_comments.json"
+    path.write_text(json.dumps([{
+        "comment_id":9007199254740993,"parent_comment_id":9007199254740992,
+        "content":"reply","create_time":1754000000000,"author_nickname":"viewer",
+    }]),encoding="utf-8")
+    row=MediaCrawlerFileFetcher(tmp_path).fetch("dy","123")[0]
+    assert row.comment_id=="9007199254740993"
+    assert row.parent_comment_id=="9007199254740992"
+    assert row.create_time=="1754000000000"
+    assert row.author_nickname=="viewer"
+
+
 def test_fetch_douyin_works_without_media_crawler(monkeypatch: pytest.MonkeyPatch):
     """未配置 MediaCrawler 时，抖音短链也应走内置接口拿到评论。"""
     _fake_douyin_api(monkeypatch, _DOUYIN_API_PAYLOAD)
@@ -304,19 +322,35 @@ def test_fetch_douyin_works_without_media_crawler(monkeypatch: pytest.MonkeyPatc
     assert source == "抖音评论接口::7679416235511106843"
 
 
-def test_fetch_douyin_falls_back_to_media_crawler(monkeypatch: pytest.MonkeyPatch):
-    """抖音接口返回空时，降级到已配置的 MediaCrawler 后端。"""
+def test_fetch_douyin_prefers_configured_media_crawler(monkeypatch: pytest.MonkeyPatch):
+    """已配置的评论源优先，不应被非空的十条热门样本遮蔽。"""
 
     class _Backend:
         def fetch(self, mc_platform, video_id):
             return [CommentItem(comment_id="mc1", content="来自 MediaCrawler")]
 
-    _fake_douyin_api(monkeypatch, {"comments": []})
+    sample_calls=[]
+    def no_sample(*args, **kwargs):
+        sample_calls.append(args)
+        raise AssertionError("The limited sample endpoint must not run.")
+    monkeypatch.setattr(DouyinCommentFetcher, "fetch", no_sample)
     comments, source = fetch_comments_for_url(
         "https://www.douyin.com/video/7311223344556", Settings(), backend=_Backend()
     )
     assert [c.content for c in comments] == ["来自 MediaCrawler"]
     assert source.startswith("MediaCrawler::")
+    assert sample_calls==[]
+
+
+def test_fetch_douyin_falls_back_to_sample_when_configured_source_is_empty(monkeypatch):
+    class Empty:
+        def fetch(self, platform, video):
+            return []
+    _fake_douyin_api(monkeypatch, _DOUYIN_API_PAYLOAD)
+    comments, source = fetch_comments_for_url(
+        "https://www.douyin.com/video/7311223344556", Settings(), backend=Empty()
+    )
+    assert len(comments)==2 and source.startswith("抖音评论接口::")
 
 
 # ---------------- 顶层入口与优雅降级 ----------------

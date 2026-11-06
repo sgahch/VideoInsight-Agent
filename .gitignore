@@ -1,4 +1,7 @@
 .venv/
+.venv-comments/
+.vendor/
+data/comments/
 __pycache__/
 .pytest_cache/
 .pytest_tmp/
@@ -19,8 +22,19 @@ media/
 
 # 本地临时脚本与工具记忆
 .workbuddy/
+.workbuddy-ai/
+.serena/
+.playwright-cli/
+output/
 _smoke_*.py
 _verify_*.py
+
+# Local session exports and one-off previews
+session_summary.json
+*_session_extract.txt
+a2.txt
+a4.txt
+web/_preview_typography.html
 
 # 登录凭证：抖音/各平台 Cookies 一律不入库（泄露即等于账号失陷）
 cookies.txt

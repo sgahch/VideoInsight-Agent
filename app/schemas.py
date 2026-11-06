@@ -43,8 +43,8 @@ class AnalyzeRequest(BaseModel):
     )
     with_comments: bool = Field(
         default=True,
-        description="是否尝试抓取并融合观众评论。抖音走内置直连接口（零依赖，返回热门评论）；"
-        "其他平台需配置 MediaCrawler（media_crawler_output_dir / media_crawler_api_url）。"
+        description="是否抓取观众评论。配置完整评论服务后在后台遍历一级评论和子评论；旧版抖音直连仅返回热门评论。"
+        "完整服务支持抖音、快手、B站和小红书，需相应平台的有效登录状态。"
         "抓取失败或平台不支持时自动跳过，不影响主分析链路。",
     )
     client_id: str | None = Field(
@@ -55,6 +55,12 @@ class AnalyzeRequest(BaseModel):
     llm_provider: str | None = Field(default=None, exclude=True, repr=False)
     llm_base_url: str | None = Field(default=None, exclude=True, repr=False)
     llm_model: str | None = Field(default=None, exclude=True, repr=False)
+    llm_protocol: str | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description="接口协议：chat_completions（默认）/ responses / messages（Anthropic 原生）。",
+    )
     llm_api_key: str | None = Field(
         default=None,
         exclude=True,
@@ -106,7 +112,7 @@ class AnalysisResult(BaseModel):
     media: MediaInfo
     comments: list[CommentItem] | None = Field(
         default=None,
-        description="观众评论（需单独部署 MediaCrawler 并配置输出目录/接口）。无评论时为 None。",
+        description="兼容旧版评论数据；完整后台评论的任务 ID 位于 diagnostics.comment_job_id。",
     )
     title: str = Field(
         default="",
@@ -138,6 +144,17 @@ class TaskRecord(BaseModel):
     estimated_total_seconds: float | None = None
 
 
+class TaskSummary(BaseModel):
+    task_id: str
+    status: TaskStatus
+    request: AnalyzeRequest
+    created_at: datetime
+    updated_at: datetime
+    title: str = ""
+    media_title: str | None = None
+    error: str | None = None
+
+
 class ChatRequest(BaseModel):
     question: str = Field(..., description="用户针对某个已完成任务转写稿提出的问题。")
     # 用户自备模型配置（可选）：提供时对话使用用户自己的 LLM，否则使用服务器配置
@@ -157,7 +174,22 @@ class ChatRequest(BaseModel):
         default=None,
         description="用户自己的 API Key（仅本次请求使用，不会持久化）。",
     )
+    llm_protocol: str | None = Field(
+        default=None,
+        description="接口协议：chat_completions（默认）/ responses / messages（Anthropic 原生）。"
+        "部分中转站只提供 responses 或 messages 端点。",
+    )
 
 
 class ChatResponse(BaseModel):
     answer: str = Field(..., description="仅依据该任务转写稿生成的回答（Markdown）。")
+
+
+class LlmTestRequest(BaseModel):
+    """模型配置连通性自检请求（不落库，仅发一条极短请求验证）。"""
+
+    llm_provider: str | None = Field(default=None)
+    llm_base_url: str | None = Field(default=None)
+    llm_model: str | None = Field(default=None)
+    llm_api_key: str = Field(default="", description="待验证的 API Key；留空测试服务端默认模型。")
+    llm_protocol: str | None = Field(default=None, description="chat_completions / responses / messages")

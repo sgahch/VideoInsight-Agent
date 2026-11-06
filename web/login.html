@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>登录 · VideoInsight Agent</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20261023-login" />
+  <link rel="stylesheet" href="/static/login.css?v=20261023-login" />
+</head>
+<body class="login-page">
+  <main class="login-shell">
+    <section class="login-intro" aria-label="VideoInsight">
+      <a class="login-brand" href="/"><span class="brand-logo">V</span> VideoInsight<span class="login-brand-sub">AGENT</span></a>
+      <div class="login-story">
+        <p class="login-eyebrow">让每一次观看，都有所收获</p>
+        <h1>从一段视频，<br />到你的<span>知识洞察。</span></h1>
+        <p class="login-description">提取逐字稿、梳理核心观点，和 AI 一起深入理解。<br />你的视频分析工作台，随时就绪。</p>
+        <div class="login-features"><span>逐字稿提取</span><span>智能总结</span><span>AI 深度追问</span></div>
+      </div>
+      <p class="login-footnote">VIDEO → INSIGHT → KNOWLEDGE</p>
+    </section>
+    <section class="login-card" aria-labelledby="login-title">
+      <span class="login-card-label">你的专属工作台</span>
+      <h2 id="login-title">欢迎回来</h2>
+      <p class="login-card-note">登录账号，继续探索视频中的价值。</p>
+      <form id="loginForm">
+        <div class="login-field"><label for="username">账号</label><input class="form-input" id="username" name="username" autocomplete="username" placeholder="请输入账号" required maxlength="100" autofocus /></div>
+        <div class="login-field"><label for="password">密码</label><div class="login-password"><input class="form-input" id="password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required maxlength="512" /><button id="togglePassword" type="button" aria-label="显示密码" aria-pressed="false">显示</button></div></div>
+        <p id="loginError" class="login-error" role="alert" aria-live="polite"></p>
+        <button id="loginSubmit" class="btn btn-primary login-submit" type="submit">登录工作台 <span aria-hidden="true">→</span></button>
+      </form>
+      <p class="login-session-note">登录状态保留 7 天 · 请使用管理员提供的账号</p>
+    </section>
+  </main>
+  <script src="/static/login.js?v=20261023-login" defer></script>
+</body>
+</html>

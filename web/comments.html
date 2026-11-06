@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>评论中心 · VideoInsight</title>
+  <link rel="stylesheet" href="/static/comments.css?v=20261105">
+  <script defer src="/static/comment-utils.js?v=20261105"></script>
+  <script defer src="/static/comments.js?v=20261105"></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/">V<span>VideoInsight</span></a><a href="/">← 返回视频分析</a></header>
+  <main>
+    <div class="intro"><p class="eyebrow">COMMENTS / 评论中心</p><h1>把讨论，也看完整。</h1><p>抖音、快手、B站、小红书 · 一级评论与子评论逐页采集</p></div>
+    <p id="notice" role="status" aria-live="polite" hidden></p>
+    <section class="panel" aria-labelledby="loginTitle">
+      <div class="section-head"><h2 id="loginTitle">平台登录</h2><span class="muted">Cookies 仅保存在服务器，不回传浏览器</span></div>
+      <div id="platforms" class="platforms"></div>
+      <details id="cookieDetails">
+        <summary>导入或更新平台 Cookies</summary>
+        <p class="muted">在浏览器登录对应平台，按 F12 → 网络，打开该平台的请求，复制请求标头中的 Cookie 值。也支持 Netscape cookies.txt 和浏览器导出的 JSON。</p>
+        <form id="cookieForm">
+          <div class="row"><label for="cookiePlatform">平台</label><select id="cookiePlatform"><option value="dy">抖音</option><option value="ks">快手</option><option value="bili">B站</option><option value="xhs">小红书</option></select><label class="file-label" for="cookieFile">选择 Cookies 文件</label><input id="cookieFile" type="file" accept=".txt,.json"></div>
+          <label class="sr-only" for="cookieContent">Cookies 内容</label><textarea id="cookieContent" rows="4" placeholder="粘贴 Cookie 请求头或导出的文件内容" autocomplete="off" spellcheck="false" required maxlength="200000"></textarea>
+          <div class="row"><button type="submit">保存登录信息</button><button id="removeCookies" type="button" class="secondary">清除此平台 Cookies</button></div>
+        </form>
+      </details>
+    </section>
+    <section class="panel" aria-labelledby="startTitle">
+      <h2 id="startTitle">抓取评论</h2>
+      <form id="jobForm" class="start-form"><label class="sr-only" for="videoUrl">视频链接或分享文案</label><input id="videoUrl" placeholder="粘贴视频链接或分享文案…" maxlength="5000" required><button type="submit">开始全量抓取</button></form>
+      <p class="muted">不设评论条数上限，包含子评论。大评论区在后台运行，可关闭页面，稍后继续查看。小红书请保留分享链接中的 xsec_token。</p>
+      <p class="scope">“已遍历完成”表示当前账号可见的一级评论及回复接口均已到末页；已删除、隐藏或平台未开放的评论无法获取。抓取中断会保留数据和翻页位置。视频分析的首次总结不会等待后台评论。</p>
+    </section>
+    <section class="panel" aria-labelledby="browserImportTitle">
+      <h2 id="browserImportTitle">导入本机采集结果</h2>
+      <p class="muted">在已登录 B站的本机浏览器完成采集后，选择生成的 snapshot.json。系统会重新核对评论与回复数量，保留图片链接和页面总数差额。</p>
+      <form id="browserImportForm" class="row">
+        <label for="browserSnapshot">采集文件</label><input id="browserSnapshot" type="file" accept=".json,application/json" required>
+        <button type="submit">导入评论中心</button>
+      </form>
+    </section>
+    <div class="workspace">
+      <section class="panel job-panel" aria-labelledby="jobsTitle"><div class="section-head"><h2 id="jobsTitle">抓取记录</h2><button id="refresh" class="text-button" type="button">刷新</button></div><div id="jobs"><p class="muted">加载中…</p></div></section>
+      <section class="panel results" aria-labelledby="resultTitle"><div id="empty"><h2 id="resultTitle">评论与进度</h2><p class="muted">开始抓取，或选择左侧记录查看评论。</p></div>
+        <div id="detail" hidden>
+          <div class="section-head"><h2 id="detailTitle">评论与进度</h2><span id="jobStatus" class="badge"></span></div>
+          <a id="sourceUrl" target="_blank" rel="noopener noreferrer" class="source-url"></a>
+          <div id="stats" class="stats"></div><p id="jobMessage" class="scope"></p>
+          <div class="row actions"><button id="retry" type="button">继续抓取</button><button id="cancel" class="secondary" type="button">停止抓取</button><a id="export" class="button secondary">导出全部 JSONL</a><a id="exportFiltered" class="button secondary">导出当前筛选</a></div>
+          <div class="comment-filters">
+            <label for="commentSort">排序<select id="commentSort"><option value="likes">最热 · 点赞数</option><option value="newest">最新 · 发布时间</option><option value="top10">热评前 10</option><option value="collected">采集顺序</option></select></label>
+            <label for="commentScope">范围<select id="commentScope"><option value="roots">一级评论</option><option value="all">全部评论</option><option value="replies">仅子评论</option></select></label>
+            <label for="pageSize">每页<select id="pageSize"><option value="20">20 条</option><option value="50">50 条</option><option value="100" selected>100 条</option></select></label>
+          </div>
+          <p id="rankingScope" class="muted" role="status"></p>
+          <div id="commentList" aria-live="polite"></div>
+          <div class="pager"><button id="previous" class="secondary" type="button">上一页</button><span id="pageInfo"></span><button id="next" class="secondary" type="button">下一页</button></div>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

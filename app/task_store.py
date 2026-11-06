@@ -8,7 +8,7 @@ from threading import RLock
 from uuid import uuid4
 
 from app.config import settings
-from app.schemas import AnalysisResult, AnalyzeRequest, TaskRecord, TaskStatus
+from app.schemas import AnalysisResult, AnalyzeRequest, TaskRecord, TaskStatus, TaskSummary
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -29,6 +29,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 _MIGRATE_CLIENT_ID = "ALTER TABLE tasks ADD COLUMN client_id TEXT"
 # client_id 索引在迁移完成后创建（避免老库缺列时建索引失败）
 _INDEX_CLIENT_ID = "CREATE INDEX IF NOT EXISTS idx_tasks_client ON tasks(client_id)"
+_INDEX_CLIENT_HISTORY = "CREATE INDEX IF NOT EXISTS idx_tasks_client_history ON tasks(client_id, created_at)"
 
 
 class SQLiteTaskStore:
@@ -65,6 +66,7 @@ class SQLiteTaskStore:
         if "client_id" not in columns:
             conn.execute(_MIGRATE_CLIENT_ID)
         conn.execute(_INDEX_CLIENT_ID)
+        conn.execute(_INDEX_CLIENT_HISTORY)
 
     def create(self, request: AnalyzeRequest) -> TaskRecord:
         now = datetime.now()
@@ -117,11 +119,41 @@ class SQLiteTaskStore:
         「提交时忘带身份 → 任务创建成功但永远列不出来」，以及「无归属任务
         被任意身份读取/删除」。SQLite 里无归属存为 NULL，不能用 `= ?` 比较。
         """
+        return [self._row_to_task(row) for row in self._list_rows("*", limit, status, client_id)]
+
+    def list_summaries(
+        self,
+        limit: int = 50,
+        status: TaskStatus | None = None,
+        client_id: str | None = None,
+    ) -> list[TaskSummary]:
+        columns = (
+            "task_id, status, request_json, error, created_at, updated_at, "
+            "json_extract(result_json, '$.title') AS title, "
+            "json_extract(result_json, '$.media.title') AS media_title"
+        )
+        return [
+            TaskSummary(
+                task_id=row["task_id"],
+                status=row["status"],
+                request=AnalyzeRequest.model_validate_json(row["request_json"]),
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                title=row["title"] or "",
+                media_title=row["media_title"],
+                error=row["error"],
+            )
+            for row in self._list_rows(columns, limit, status, client_id)
+        ]
+
+    def _list_rows(
+        self, columns: str, limit: int, status: TaskStatus | None, client_id: str | None,
+    ) -> list[sqlite3.Row]:
         if client_id is None:
-            sql = "SELECT * FROM tasks WHERE client_id IS NULL"
+            sql = f"SELECT {columns} FROM tasks WHERE client_id IS NULL"
             params: list[object] = []
         else:
-            sql = "SELECT * FROM tasks WHERE client_id = ?"
+            sql = f"SELECT {columns} FROM tasks WHERE client_id = ?"
             params = [client_id]
 
         if status is not None:
@@ -139,7 +171,10 @@ class SQLiteTaskStore:
                 rows = conn.execute(sql, params).fetchall()
             finally:
                 conn.close()
-        return [self._row_to_task(row) for row in rows]
+        return rows
+
+    def set_partial_result(self, task_id: str, result: AnalysisResult) -> None:
+        self._update(task_id, result=result)
 
     def set_running(self, task_id: str) -> None:
         self._update(task_id, status=TaskStatus.running, error=None)

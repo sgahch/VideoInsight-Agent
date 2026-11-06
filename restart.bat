@@ -32,6 +32,13 @@ if not exist "%PY%" (
     exit /b 1
 )
 
+if exist "%PROJ%.venv-comments\Scripts\python.exe" (
+    echo Starting the local MediaCrawler comment service ...
+    "%PY%" -m crawler_service.manage start
+    if errorlevel 1 echo [WARNING] Comment service failed to start. Check data\logs\comments-service.log.
+    echo.
+)
+
 echo [1/3] Stopping old service on port %PORT% ...
 set "KILLED=0"
 REM NOTE: the service runs as a parent process plus a forked worker, and the
