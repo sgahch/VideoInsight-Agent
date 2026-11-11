@@ -118,9 +118,8 @@ The application now supports a private `GROQ_PROXY_URL` for HTTP/HTTPS
 proxies. An explicit proxy overrides environment proxies for Groq only;
 connection failure does not trigger direct or paid-provider fallback.
 Proxy credentials are excluded from settings repr and redacted from errors.
-Production still needs a persistent, approved server-side proxy endpoint.
+The production rollout below supersedes the initial direct-access limitation.
 Do not rely on an operator's laptop staying online or expose an open proxy.
-This configuration addition has not yet been deployed to the production image.
 
 DeepSeek model listing returned HTTP 200. The server configuration uses
 `deepseek-flash`, which was present in that response, instead of the local
@@ -128,3 +127,63 @@ legacy `deepseek-chat` value. No paid summary request was needed for this check.
 
 The installed runtime package versions were recorded separately on the server
 at `/opt/videoinsight/releases/e2434d0/runtime-packages.txt`.
+
+## Groq Production Rollout
+
+On 2026-11-11, with the owner's approval, exactly one locally configured
+upstream node was installed in a private Docker sidecar. No subscription URL,
+complete subscription, or browser session was copied to the server.
+
+- Application image: `videoinsight:9ff867c`.
+- Proxy image: `videoinsight-groq-proxy:v1.19.34`, using the official Linux
+  compatible release asset verified against its published SHA-256:
+  `2763f5b414527f7baf6dc57e3f82f3ab561eedf34bfd7c2f2cde1f7e592efe06`.
+- Both services use `videoinsight-network` and `unless-stopped`.
+- Proxy runs as UID 65532, without capabilities or published ports, with a
+  read-only root filesystem, a 16 MiB temporary filesystem, 96 MiB memory
+  limit, 0.3 CPU limit, 64 PID limit, and bounded logs.
+- Proxy requires separate generated authentication and allows only
+  `api.groq.com:443`. No TUN, DNS listener, controller, or global proxy
+  environment was enabled.
+- Node credentials stay in `/opt/videoinsight/groq-proxy/config.json`,
+  mode 0600, UID 65532, inside a root-only directory. The application proxy
+  URL and replacement Groq key stay in the root-only private `.env`.
+- The provider's node hostname returned both reachable and unreachable
+  ingress addresses. A verified reachable ingress is pinned in the private
+  proxy `hosts` configuration; no host-level DNS setting was changed.
+  If the provider retires that ingress, update this private override after
+  testing a replacement. The health check reports failure, not node rotation.
+- An authenticated CONNECT and verified TLS health check runs every three
+  minutes. It expects Groq's unauthenticated model-listing response to be
+  401 and does not call a model or require a Groq key.
+
+New analysis submissions were temporarily gated in this application's Nginx
+vhost. After all clients' queued/running tasks drained, SQLite, `.env`, the
+original container configuration, and the Nginx vhost were backed up to
+`/opt/videoinsight/backups/20261111-groq-9ff867c` (root-only). The original
+container remains stopped as `videoinsight-before-groq-9ff867c`, with restart
+disabled, for rollback. Only the Groq key and proxy setting changed; all
+other application environment settings were verified unchanged.
+
+Both Windows and the deployed Linux runtime passed all 433 Python tests,
+with the existing dependency deprecation warning. The Linux suite needs
+network access for an existing real Douyin short-URL redirect test; test-only
+comment-service source was mounted read-only, not enabled as a service.
+
+Actual Groq model listing and Chinese speech transcription returned 200.
+An application API upload in real transcript mode then completed successfully
+in about 1.6 seconds for the generated 6.73-second sample. Transcript text,
+timestamps, detail page, used marker, authentication, and cleanup passed.
+Only the isolated test task was deleted; historical task counts matched.
+No paid-provider fallback or paid LLM request was used.
+
+The original Nginx configuration was restored byte-for-byte and submissions
+were reopened. Both application and sidecar reported healthy. StarDevil and
+the other pre-existing containers retained the same IDs and start times.
+No host networking, firewall, or unrelated service configuration was changed.
+The deployment does not depend on the Windows computer or an SSH tunnel.
+
+Runtime package versions are recorded at
+`/opt/videoinsight/releases/9ff867c/runtime-packages.txt`. The public endpoint
+is still HTTP; this rollout does not add HTTPS or resolve separate platform
+download restrictions.

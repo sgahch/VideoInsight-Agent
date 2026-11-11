@@ -26,6 +26,12 @@ media/
 .serena/
 .playwright-cli/
 output/
+# Private Groq proxy runtime artifacts
+deploy/groq-proxy/mihomo
+deploy/groq-proxy/mihomo*.gz
+deploy/groq-proxy/config*.json
+deploy/groq-proxy/config*.yaml
+deploy/groq-proxy/config*.yml
 _smoke_*.py
 _verify_*.py
 
