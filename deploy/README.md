@@ -1,5 +1,8 @@
 # IP 端口部署
 
+2026-11-11 新服务器部署见 [IP server deployment](ip-server.md)。
+以下保留旧服务器部署记录，不代表新服务器的配置。
+
 访问地址：`http://64.90.27.136:8000`。账号 `ynchen`，密码由部署时设置。
 
 - 项目目录：`/opt/videoinsight`
