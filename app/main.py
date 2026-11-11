@@ -18,7 +18,7 @@ from app.comments_api import router as comments_router
 from app.adapters.asr import format_transcript
 from app.adapters.downloader import YtDlpDownloader, default_cookies_file, resolve_cookies_file, select_downloader
 from app.adapters.llm import MockLlmAnalyzer, OpenAICompatibleAnalyzer
-from app.browser_cookies import BrowserCookieError, capture_douyin_cookies, cookie_browser_status, start_cookie_browser
+from app.browser_cookies import BrowserCookieError, capture_douyin_cookies, cookie_browser_capabilities, cookie_browser_status, start_cookie_browser
 from app.cookies import summarize_cookie_file, write_normalized_cookie_file
 from app.errors import VideoInsightError
 from app.qr_login import QRLoginError, check_qr_login, start_qr_login
@@ -419,7 +419,10 @@ def upload_cookies(file: UploadFile = File(...)) -> dict[str, object]:
 
 @app.get("/cookies/status")
 def get_cookies_status() -> dict[str, object]:
-    return summarize_cookie_file(_cookie_storage_path())
+    return {
+        **summarize_cookie_file(_cookie_storage_path()),
+        "authorization": cookie_browser_capabilities(settings),
+    }
 
 
 @app.post("/cookies/qr/start")
@@ -449,7 +452,7 @@ def start_browser_cookie_capture() -> dict[str, object]:
 @app.get("/cookies/browser/status")
 def get_browser_cookie_capture_status() -> dict[str, object]:
     try:
-        return cookie_browser_status()
+        return cookie_browser_status(settings)
     except BrowserCookieError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

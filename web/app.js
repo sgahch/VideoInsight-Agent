@@ -143,6 +143,11 @@
     cookieText: $("#cookieText"),
     cookieFile: $("#cookieFile"),
     cookieMessage: $("#cookieMessage"),
+    cookieAuthHint: $("#cookieAuthHint"),
+    cookieImport: $("#cookieImport"),
+    cookieImportSummary: $("#cookieImportSummary"),
+    cookieTextActions: $("#cookieTextActions"),
+    desktopCookieActions: $("#desktopCookieActions"),
     qrImage: $("#qrImage"),
     qrMessage: $("#qrMessage"),
     saveCookieText: $("#saveCookieText"),
@@ -207,6 +212,7 @@
     qrTimer: null,
     qrAttempts: 0,
     pendingCookieRetry: null,
+    cookieAuthorization: null,
     parsedLink: null, // 最新的 /parse-link 解析结果（含干净 url 与建议标签）
     transcriptText: "",
     summaryText: "", // AI 总结原始 Markdown，供「复制」按钮使用
@@ -877,10 +883,12 @@
           useMock: Boolean(task.request.use_mock),
         };
         setCookieMessage(
-          "检测到抖音登录态失效。点击“登录/刷新抖音 Cookies”，扫码成功后会自动重试该链接。",
+          state.cookieAuthorization?.mode === "desktop"
+            ? "该链接需要更新登录态，登录成功后会自动重试。"
+            : "该链接需要更新登录态，导入对应平台 Cookies 后会自动重试。",
           "error",
         );
-        els.startQrLogin.textContent = "登录并自动重试该链接";
+        renderCookieAuthorization(state.cookieAuthorization);
       }
     } else if (task.status === "succeeded") {
       setTaskStatus("succeeded", "分析完成。");
@@ -1310,7 +1318,7 @@
         20000,
       );
       state.pendingCookieRetry = null;
-      els.startQrLogin.textContent = "登录/刷新抖音 Cookies";
+      renderCookieAuthorization(state.cookieAuthorization);
       els.videoUrl.value = url;
       els.linkMode.value = mode;
       setCookieMessage(
@@ -1573,10 +1581,31 @@
     return { text: `已配置，无登录态（${summary.count} 条）`, cls: "badge-accent" };
   }
 
+  function renderCookieAuthorization(capabilities) {
+    const previousMode = state.cookieAuthorization?.mode;
+    const desktop = capabilities?.mode === "desktop" && capabilities.desktop_available === true;
+    state.cookieAuthorization = { ...capabilities, mode: desktop ? "desktop" : "import" };
+    els.startQrLogin.hidden = !desktop;
+    els.checkCookieBrowser.hidden = !desktop;
+    els.desktopCookieActions.hidden = !desktop;
+    els.cookieTextActions.classList.toggle("two", desktop);
+    els.cookieTextActions.classList.toggle("single", !desktop);
+    els.cookieImportSummary.textContent = desktop ? "手动导入与故障排查" : "导入平台 Cookies";
+    els.cookieAuthHint.textContent = desktop
+      ? "本地桌面授权 · 抖音扫码 / 文件导入"
+      : "文件 / 文本导入 · 当前服务无桌面登录窗口";
+    els.startQrLogin.textContent = state.pendingCookieRetry
+      ? "登录并自动重试该链接" : "登录/刷新抖音 Cookies";
+    if (previousMode !== state.cookieAuthorization.mode) {
+      els.cookieImport.open = !desktop;
+    }
+  }
+
   /** 拉取 /cookies/status 并刷新两处状态徽章。 */
   async function refreshCookieStatus() {
     try {
       const summary = await fetchJson("/cookies/status", {}, 8000);
+      renderCookieAuthorization(summary.authorization);
       const badge = cookieBadge(summary);
       els.cookieState.className = `badge ${badge.cls}`;
       els.cookieState.textContent = badge.text;
@@ -1584,6 +1613,8 @@
       els.sidebarCookieStatus.textContent = badge.text;
       return summary;
     } catch (error) {
+      renderCookieAuthorization(null);
+      els.cookieAuthHint.textContent = "授权状态检查失败";
       els.cookieState.className = "badge badge-danger";
       els.cookieState.textContent = "检查失败";
       els.sidebarCookieStatus.className = "badge badge-danger";
@@ -1662,6 +1693,11 @@
 
   /** 启动扫码登录会话并轮询状态。 */
   async function startQrLogin() {
+    if (state.cookieAuthorization?.mode !== "desktop") {
+      els.cookieImport.open = true;
+      els.cookieFile.focus();
+      return;
+    }
     stopQrPolling();
     els.qrImage.hidden = true;
     els.qrImage.removeAttribute("src");
@@ -2459,7 +2495,7 @@
 
     els.saveCookieText.addEventListener("click", saveCookieText);
     els.verifyCookies.addEventListener("click", async () => {
-      setCookieMessage("正在检查本地 Cookies...");
+      setCookieMessage("正在检查已保存的 Cookies...");
       const data = await refreshCookieStatus();
       if (data) {
         setCookieMessage(`${describeCookieSummary(data)}。`);

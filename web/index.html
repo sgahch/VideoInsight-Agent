@@ -5,7 +5,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>VideoInsight Agent - 沉浸式 AI 视频分析平台</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261105-platforms1" />
+  <link rel="stylesheet" href="/static/styles.css?v=20261111-cookie-mode1" />
   <link rel="stylesheet" href="/static/queue.css?v=20261106-used1" />
 </head>
 
@@ -392,15 +392,12 @@
         </div>
 
         <div class="cookie-box">
-          <p class="settings-note" style="margin-bottom: 12px;">
-            大多数链接无需登录。遇到抖音登录态失效时，点击下方按钮扫码；
-            <strong>登录成功后会自动保存 Cookies 并重试刚才的链接任务。</strong>
-          </p>
+          <p id="cookieAuthHint" class="settings-note">授权方式检查中...</p>
 
-          <button id="startQrLogin" class="btn full-width" type="button">登录/刷新抖音 Cookies</button>
+          <button id="startQrLogin" class="btn full-width" type="button" hidden>登录/刷新抖音 Cookies</button>
 
-          <details class="cookie-advanced">
-            <summary>手动导入与故障排查（高级）</summary>
+          <details id="cookieImport" class="cookie-advanced" open>
+            <summary id="cookieImportSummary">导入平台 Cookies</summary>
 
             <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;">
               <label class="form-label" for="cookieFile">上传 cookies.txt / JSON</label>
@@ -413,11 +410,11 @@
               <label class="form-label" for="cookieText">粘贴 Cookie 或 Cookie Editor JSON</label>
               <textarea id="cookieText" class="cookie-textarea" rows="4"
                 placeholder="Cookie: sessionid=...; sid_guard=... 或 Cookie Editor 导出的 JSON"></textarea>
-              <div class="button-grid two">
+              <div id="cookieTextActions" class="button-grid single">
                 <button id="saveCookieText" class="mini-btn" type="button">粘贴保存</button>
-                <button id="checkCookieBrowser" class="mini-btn" type="button">检查登录窗口</button>
+                <button id="checkCookieBrowser" class="mini-btn" type="button" hidden>检查登录窗口</button>
               </div>
-              <div class="button-grid two">
+              <div id="desktopCookieActions" class="button-grid two" hidden>
                 <button id="openCookieBrowser" class="mini-btn" type="button">打开登录窗口</button>
                 <button id="captureCookieBrowser" class="mini-btn" type="button">抓取登录态</button>
               </div>
@@ -538,7 +535,7 @@
 
   <script src="/static/comment-utils.js?v=20261105"></script>
   <script src="/static/queue.js?v=20261106-used1"></script>
-  <script src="/static/app.js?v=20261109-model-id1"></script>
+  <script src="/static/app.js?v=20261111-cookie-mode1"></script>
 </body>
 
 </html>

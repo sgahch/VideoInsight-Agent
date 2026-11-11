@@ -31,7 +31,7 @@ def check_qr_login(session_id: str, runtime_settings: Settings = settings) -> di
         raise QRLoginError("没有找到二维码会话，请重新打开扫码登录窗口。")
 
     try:
-        status = cookie_browser_status()
+        status = cookie_browser_status(runtime_settings)
     except BrowserCookieError as exc:
         raise QRLoginError(str(exc)) from exc
 

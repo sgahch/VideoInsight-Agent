@@ -59,6 +59,7 @@ class Settings:
         Path(os.environ["YTDLP_COOKIES_FILE"]) if os.getenv("YTDLP_COOKIES_FILE") else None
     )
     ytdlp_cookies_from_browser: str | None = os.getenv("YTDLP_COOKIES_FROM_BROWSER") or None
+    cookie_login_mode: str = os.getenv("COOKIE_LOGIN_MODE", "auto")
     # MediaCrawler-backed background jobs use our authenticated comment service.
     # The legacy file/API adapters below remain available for imported samples.
     media_crawler_api_url: str | None = os.getenv("MEDIA_CRAWLER_API_URL") or None

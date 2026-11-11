@@ -1411,6 +1411,9 @@ input[type="file"].cookie-textarea {
 .button-grid.two {
   grid-template-columns: repeat(2, 1fr);
 }
+.button-grid.single {
+  grid-template-columns: minmax(0, 1fr);
+}
 .mini-btn {
   background: var(--surface-muted);
   border: 1px solid var(--border);

@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import subprocess
+import sys
 from urllib.error import HTTPError, URLError
 from itertools import count
 from pathlib import Path
@@ -37,11 +38,45 @@ class BrowserCookieError(Exception):
     pass
 
 
+def cookie_browser_capabilities(runtime_settings: Settings = settings) -> dict[str, object]:
+    mode = runtime_settings.cookie_login_mode.strip().lower()
+    if mode not in {"auto", "desktop", "import"} or mode == "import":
+        reason = "configured_import"
+    elif mode == "auto" and not _has_desktop_display():
+        reason = "headless"
+    elif _active_debug_port(runtime_settings) is None and _find_chromium() is None:
+        reason = "browser_unavailable"
+    else:
+        return {"mode": "desktop", "desktop_available": True, "reason": None}
+    return {
+        "mode": "import",
+        "desktop_available": False,
+        "reason": reason,
+        "message": (
+            "当前服务没有可用的桌面登录窗口，无法在你的电脑上弹出浏览器。"
+            "请上传对应平台的 Cookies 文件或粘贴导出内容。"
+        ),
+    }
+
+
+def _has_desktop_display() -> bool:
+    return sys.platform in {"win32", "darwin"} or bool(
+        os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY")
+    )
+
+
+def _require_desktop_login(runtime_settings: Settings) -> None:
+    capabilities = cookie_browser_capabilities(runtime_settings)
+    if not capabilities["desktop_available"]:
+        raise BrowserCookieError(str(capabilities["message"]))
+
+
 def start_cookie_browser(
     runtime_settings: Settings = settings,
     *,
     reset_session: bool = False,
 ) -> dict[str, object]:
+    _require_desktop_login(runtime_settings)
     existing_port = _active_debug_port(runtime_settings)
     if existing_port is not None:
         tab_state = _ensure_douyin_tab(existing_port)
@@ -96,12 +131,18 @@ def start_cookie_browser(
     }
 
 
-def cookie_browser_status() -> dict[str, object]:
-    debug_port = _active_debug_port()
+def cookie_browser_status(runtime_settings: Settings = settings) -> dict[str, object]:
+    capabilities = cookie_browser_capabilities(runtime_settings)
+    if not capabilities["desktop_available"]:
+        return {
+            **capabilities, "running": False, "port": None,
+            "tabs": [], "has_douyin_tab": False,
+        }
+    debug_port = _active_debug_port(runtime_settings)
     if debug_port is None:
         return {
             "running": False,
-            "port": _saved_debug_port() or BASE_DEBUG_PORT,
+            "port": _saved_debug_port(runtime_settings) or BASE_DEBUG_PORT,
             "tabs": [],
             "has_douyin_tab": False,
         }
@@ -125,6 +166,7 @@ def cookie_browser_status() -> dict[str, object]:
 
 
 def capture_douyin_cookies(runtime_settings: Settings = settings) -> dict[str, object]:
+    _require_desktop_login(runtime_settings)
     debug_port = _active_debug_port(runtime_settings)
     if debug_port is None:
         raise BrowserCookieError("专用登录窗口未连接，请先点击“打开登录窗口”。")

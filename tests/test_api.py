@@ -40,6 +40,42 @@ def test_upload_cookies(monkeypatch, tmp_path) -> None:
     assert ".douyin.com" in cookie_file.read_text(encoding="utf-8")
 
 
+def test_server_cookie_authorization_exposes_import_and_blocks_desktop(monkeypatch, tmp_path):
+    from dataclasses import replace
+
+    monkeypatch.setattr(main_module, "settings", replace(
+        main_module.settings, cookie_login_mode="import", media_dir=tmp_path / "media",
+    ))
+    client = TestClient(app)
+    status = client.get("/cookies/status").raise_for_status().json()
+    assert status["authorization"]["mode"] == "import"
+    assert status["authorization"]["desktop_available"] is False
+    browser = client.get("/cookies/browser/status").raise_for_status().json()
+    assert browser["running"] is False and browser["mode"] == "import"
+    for endpoint in ("/cookies/qr/start", "/cookies/browser/start", "/cookies/browser/capture"):
+        response = client.post(endpoint)
+        assert response.status_code == 400
+        assert "上传对应平台" in response.json()["detail"]
+        assert "未找到 Chrome" not in response.json()["detail"]
+
+
+def test_import_authorization_can_save_and_report_cookies(monkeypatch, tmp_path):
+    from dataclasses import replace
+
+    target = tmp_path / "cookies.txt"
+    monkeypatch.setattr(main_module, "settings", replace(main_module.settings, cookie_login_mode="import"))
+    monkeypatch.setattr(main_module, "default_cookies_file", lambda _: target)
+    client = TestClient(app)
+    response = client.post(
+        "/cookies", files={"file": ("cookies.txt", b"sessionid=example-session", "text/plain")},
+    )
+    assert response.status_code == 200
+    status = client.get("/cookies/status").raise_for_status().json()
+    assert status["authorization"]["mode"] == "import"
+    assert status["exists"] and status["has_login_cookie"]
+    assert "example-session" not in client.get("/cookies/status").text
+
+
 def test_submit_analysis_runs_background_task() -> None:
     client = TestClient(app)
     response = client.post(

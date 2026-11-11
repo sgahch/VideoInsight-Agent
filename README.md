@@ -167,7 +167,7 @@ curl -X POST http://127.0.0.1:8000/tasks/<task_id>/chat `
 | `GET` | `/tasks/{id}/video` | 下载源视频（mp4） |
 | `POST` | `/cookies` | 上传 `cookies.txt` |
 | `GET` | `/cookies/status` | 查看 Cookies 状态 |
-| `POST` | `/cookies/qr/start` | 扫码登录 |
+| `POST` | `/cookies/qr/start` | 本地桌面扫码登录；无桌面服务不启用 |
 | `POST` | `/cookies/browser/*` | 专用浏览器窗口抓取登录态 |
 | `GET` | `/health` | 探活（含是否启用鉴权） |
 | `POST` | `/auth/session` | 用访问令牌换取鉴权 Cookie |
@@ -396,6 +396,7 @@ Key 仅保存在 Git 忽略的 `.env`，不会通过健康检查或任务诊断�
 | `DASHSCOPE_ASR_GLOBAL_WORKERS` | `8` | 所有视频合计的转写调用并发上限 |
 | `YTDLP_COOKIES_FROM_BROWSER` | — | 复用本机浏览器 Cookies，如 `chrome` / `edge` |
 | `YTDLP_COOKIES_FILE` | — | Netscape 格式 `cookies.txt` 路径 |
+| `COOKIE_LOGIN_MODE` | `auto` | 自动检测桌面授权；`import` 仅导入，`desktop` 显式使用已有桌面环境 |
 | `MEDIA_CRAWLER_OUTPUT_DIR` | — | MediaCrawler 评论落盘目录 |
 | `MEDIA_CRAWLER_API_URL` | — | MediaCrawler API 地址 |
 
@@ -405,23 +406,32 @@ Key 仅保存在 Git 忽略的 `.env`，不会通过健康检查或任务诊断�
 
 ## 🍪 抖音 Cookies
 
-抖音只要求 Cookie 里有 **`ttwid`** 一项（用于读取移动分享页），**不需要登录态**。三种获取方式，任选其一：
+多数公开视频可直接解析；遇到登录态或风控提示时，再配置 Cookies。
 
-**方式一：扫码登录（推荐）**
+**服务器 / Docker：文件或文本导入**
+
+云端容器不能在访问者的电脑上弹出浏览器窗口，也未提供网页内扫码或远程桌面。
+`COOKIE_LOGIN_MODE=auto` 在无桌面环境自动隐藏扫码、打开窗口和抓取按钮，
+直接展开导入区。远程部署也可以显式配置 `COOKIE_LOGIN_MODE=import`。
+仅在服务器安装 Chrome 并不能让访问者看到窗口。
+
+在自己的浏览器导出 Netscape `cookies.txt` 或含域名的 Cookie Editor JSON，
+然后上传保存；抖音 Cookie 请求头文本也可粘贴保存。保存后无需重启。
+原始 Cookie 请求头没有域名信息，当前按抖音处理，其他平台请使用含域名的文件或 JSON。
+Cookies 是敏感登录凭据，请仅导入自己信任的服务，并使用 HTTPS 或 SSH 加密隧道，
+不要提交到 Git。
+
+**本地桌面：扫码登录**
 
 网页左侧「平台 Cookies」→ 扫码登录。抓到的 Cookies 保存在 `media/_cookies/cookies.txt`，无需重启服务。
 
-**方式二：专用浏览器窗口**
+**本地桌面：专用浏览器窗口**
 
 1. 点「打开登录窗口」，在项目专用窗口中登录抖音
 2. 回网页点「检查窗口」，确认 DevTools 已连接且找到抖音页面
 3. 点「抓取登录态」
 
 > 只读取项目专用窗口的 Cookies，不碰你日常浏览器的配置。
-
-**方式三：手动上传 `cookies.txt`**
-
-用浏览器扩展导出 Netscape 格式文件，在网页左侧上传，或配置 `YTDLP_COOKIES_FILE`。
 
 > ⚠️ 如果提示「抖音拒绝了当前请求」，那不是 Cookies 过期 —— 而是触发了抖音临时风控。
 > 稍后重试，或改用上传本地视频。
