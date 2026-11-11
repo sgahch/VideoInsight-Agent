@@ -128,6 +128,7 @@ class TaskRecord(BaseModel):
     request: AnalyzeRequest
     created_at: datetime
     updated_at: datetime
+    used_at: datetime | None = None
     result: AnalysisResult | None = None
     error: str | None = None
     # 实时进度（仅运行时由 progress 模块推算，不持久化）：
@@ -150,9 +151,13 @@ class TaskSummary(BaseModel):
     request: AnalyzeRequest
     created_at: datetime
     updated_at: datetime
+    used_at: datetime | None = None
     title: str = ""
     media_title: str | None = None
     error: str | None = None
+    progress: float | None = None
+    stage: str | None = None
+    queue_position: int | None = None
 
 
 class ChatRequest(BaseModel):

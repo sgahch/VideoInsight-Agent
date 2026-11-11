@@ -325,7 +325,10 @@ class OpenAICompatibleAnalyzer:
         except httpx.HTTPError as exc:
             raise WorkflowError("LLM 服务连接中断，请检查网络后重试；已生成的内容会保留。") from exc
 
-    def _complete(self, prompt: str, *, max_tokens: int | None = None, timeout: float = 120) -> str:
+    def _complete(
+        self, prompt: str, *, max_tokens: int | None = None, timeout: float = 120,
+        for_probe: bool = False,
+    ) -> str:
         api_key = self._api_key_override or self._api_key()
         candidates = candidate_base_urls(self._base_url())
         if not candidates:
@@ -335,7 +338,10 @@ class OpenAICompatibleAnalyzer:
         for index, base in enumerate(candidates):
             url = base + self._endpoint_path()
             try:
-                return self._request(url, api_key, prompt, max_tokens=max_tokens, timeout=timeout)
+                return self._request(
+                    url, api_key, prompt, max_tokens=max_tokens, timeout=timeout,
+                    for_probe=for_probe,
+                )
             except _RetryableEndpointError as exc:
                 last_retryable = str(exc)
                 if index == len(candidates) - 1:
@@ -352,8 +358,9 @@ class OpenAICompatibleAnalyzer:
         *,
         max_tokens: int | None,
         timeout: float,
+        for_probe: bool = False,
     ) -> str:
-        payload = self._build_payload(prompt, max_tokens)
+        payload = self._build_payload(prompt, max_tokens, for_probe=for_probe)
         try:
             response = httpx.post(
                 url,
@@ -418,9 +425,17 @@ class OpenAICompatibleAnalyzer:
             headers["anthropic-version"] = "2023-06-01"
         return headers
 
-    def _build_payload(self, prompt: str, max_tokens: int | None) -> dict[str, Any]:
+    def _build_payload(
+        self, prompt: str, max_tokens: int | None, *, for_probe: bool = False,
+    ) -> dict[str, Any]:
         protocol = self._protocol()
         model = self._model()
+        official_deepseek = self._is_official_deepseek()
+        if official_deepseek and re.search(r"\s", model):
+            raise WorkflowError(
+                "DeepSeek 模型名称需要填写 API 模型 ID，例如 deepseek-flash "
+                "或 deepseek-v4-flash，不能填写 DeepSeek V4 Flash 这样的显示名称。"
+            )
         if protocol == PROTOCOL_RESPONSES:
             payload: dict[str, Any] = {
                 "model": model,
@@ -432,6 +447,8 @@ class OpenAICompatibleAnalyzer:
             # Responses API 用 max_output_tokens；不传 temperature（GPT-5/Claude 系常拒绝）
             if max_tokens:
                 payload["max_output_tokens"] = max_tokens
+            if for_probe and official_deepseek:
+                payload["reasoning"] = {"effort": "none"}
             return payload
         if protocol == PROTOCOL_MESSAGES:
             return {
@@ -450,6 +467,8 @@ class OpenAICompatibleAnalyzer:
         }
         if max_tokens:
             payload["max_tokens"] = max_tokens
+        if for_probe and official_deepseek:
+            payload["thinking"] = {"type": "disabled"}
         return payload
 
     def _extract_text(self, data: dict[str, Any]) -> str:
@@ -488,10 +507,15 @@ class OpenAICompatibleAnalyzer:
     def _protocol(self) -> str:
         return normalize_protocol(self._protocol_override or getattr(self.settings, "llm_protocol", None))
 
+    def _is_official_deepseek(self) -> bool:
+        return urlsplit(normalize_base_url(self._base_url())).hostname == "api.deepseek.com"
+
     def probe(self) -> dict[str, Any]:
         """配置连通性自检：发一条极短请求，回报协议 / 端点 / 耗时。"""
         started = time.perf_counter()
-        text = self._complete("请只回复两个字：正常", max_tokens=32, timeout=45)
+        text = self._complete("请只回复两个字：正常", max_tokens=32, timeout=45, for_probe=True)
+        if not text.strip():
+            raise WorkflowError("LLM 返回了空内容，连接测试未通过，请检查模型与接口协议后重试。")
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         return {
             "ok": True,
@@ -506,6 +530,14 @@ class OpenAICompatibleAnalyzer:
     def _http_error_message(self, response: httpx.Response) -> str:
         status_code = response.status_code
         provider = self._provider_display_name()
+        if status_code == 400:
+            hint = (
+                "请填写 API 模型 ID（例如 deepseek-flash 或 deepseek-v4-flash），"
+                "不要填写 DeepSeek V4 Flash 这样的显示名称，并检查接口协议。"
+                if self._is_official_deepseek()
+                else "请确认模型名称是供应商提供的 API 模型 ID，而不是显示名称，并检查接口协议。"
+            )
+            return f"{provider} 请求参数无效（HTTP 400）。{hint}"
         if status_code == 404:
             return (
                 f"{provider} 接口路径不存在（HTTP 404）。请确认 API Base URL 是否正确——"

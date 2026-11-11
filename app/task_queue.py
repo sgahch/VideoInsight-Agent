@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import logging
 import traceback
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Condition, RLock
 from typing import Callable
 
 from app.config import Settings
@@ -32,15 +34,43 @@ INTERRUPTED_MESSAGE = "服务重启导致任务中断，请重新提交。"
 MISSING_UPLOAD_MESSAGE = "服务重启后未找到已上传的文件，请重新上传。"
 
 
-class TaskQueue:
-    """把长任务提交到专用的有界线程池执行。"""
+class TaskQueueFull(RuntimeError):
+    """The running slots and bounded waiting queue are both occupied."""
 
-    def __init__(self, max_workers: int, name: str = "videoinsight-task") -> None:
+
+class TaskRunning(RuntimeError):
+    """An executing task cannot be removed safely."""
+
+
+@dataclass
+class _Work:
+    task_id: str
+    store: SQLiteTaskStore
+    target: Callable[..., None]
+    args: tuple[object, ...]
+
+
+class TaskQueue:
+    """Core execution slots, a bounded FIFO queue, and overflow execution slots."""
+
+    def __init__(
+        self, max_workers: int, name: str = "videoinsight-task", *,
+        core_workers: int | None = None, queue_capacity: int = 32,
+    ) -> None:
         self.max_workers = max(1, max_workers)
+        self.core_workers = min(self.max_workers, max(1, core_workers or self.max_workers))
+        self.queue_capacity = max(1, queue_capacity)
         self._executor = ThreadPoolExecutor(
             max_workers=self.max_workers, thread_name_prefix=name
         )
+        self._condition = Condition(RLock())
+        self._pending: deque[_Work] = deque()
+        self._active: set[str] = set()
         self._closed = False
+        self._drain = False
+        self._accepted = 0
+        self._completed = 0
+        self._rejected = 0
 
     def submit(
         self,
@@ -49,21 +79,96 @@ class TaskQueue:
         target: Callable[..., None],
         *args: object,
     ) -> None:
-        """提交任务；入队失败时直接把任务标记为失败，不让它悬着。
+        """非阻塞入队；容量耗尽时抛出 TaskQueueFull，由入口回滚本次提交。
 
         store 按次传入而不是构造时持有：队列是进程级单例，而 store 在测试里
         会被替换。持有旧引用会让"入队失败"的兜底写到错误的库上，任务就此停在
         queued 再也不动 —— 这正是这个参数存在的原因。
         """
-        if self._closed:
-            store.set_failed(task_id, "服务正在关闭，任务未执行。")
-            return
+        work = _Work(task_id, store, target, args)
+        with self._condition:
+            if self._closed:
+                store.set_failed(task_id, "服务正在关闭，任务未执行。")
+                return
+            if store.get(task_id) is None:
+                return
+            if task_id in self._active or any(item.task_id == task_id for item in self._pending):
+                raise ValueError("Task is already in the queue")
+            if len(self._active) < self.core_workers:
+                self._dispatch(work)
+            elif len(self._pending) < self.queue_capacity:
+                self._pending.append(work)
+            elif len(self._active) < self.max_workers:
+                # Keep FIFO order when opening an overflow execution slot.
+                self._pending.append(work)
+                self._dispatch(self._pending.popleft())
+            else:
+                self._rejected += 1
+                raise TaskQueueFull("处理队列已满，请稍后重试。")
+            self._accepted += 1
+
+    def _dispatch(self, work: _Work) -> None:
+        self._active.add(work.task_id)
         try:
-            future = self._executor.submit(target, *args)
+            future = self._executor.submit(self._execute, work)
         except RuntimeError as exc:
-            store.set_failed(task_id, f"任务入队失败：{exc}")
+            self._active.discard(work.task_id)
+            work.store.set_failed(work.task_id, f"任务入队失败：{exc}")
             return
-        future.add_done_callback(lambda done: self._on_done(store, task_id, done))
+        future.add_done_callback(lambda done: self._finished(work, done))
+
+    def _execute(self, work: _Work) -> None:
+        # Register the completion callback before even an immediate target can finish.
+        with self._condition:
+            pass
+        work.target(*work.args)
+
+    def _finished(self, work: _Work, future: Future) -> None:
+        try:
+            if not future.cancelled():
+                self._on_done(work.store, work.task_id, future)
+        finally:
+            with self._condition:
+                self._active.discard(work.task_id)
+                self._completed += 1
+                if self._pending and (not self._closed or self._drain):
+                    self._dispatch(self._pending.popleft())
+                self._condition.notify_all()
+
+    def snapshot(self) -> dict[str, object]:
+        with self._condition:
+            return {
+                "core_workers": self.core_workers,
+                "max_workers": self.max_workers,
+                "queue_capacity": self.queue_capacity,
+                "active_workers": len(self._active),
+                "queued": len(self._pending),
+                "accepted": self._accepted,
+                "completed": self._completed,
+                "rejected": self._rejected,
+                "closed": self._closed,
+                "active_task_ids": list(self._active),
+                "queued_task_ids": [item.task_id for item in self._pending],
+            }
+
+    def cancel_pending(self, task_id: str, store: SQLiteTaskStore | None = None) -> bool:
+        with self._condition:
+            if task_id in self._active:
+                raise TaskRunning("任务正在处理，不能删除。")
+            removed = False
+            for item in self._pending:
+                if item.task_id == task_id:
+                    self._pending.remove(item)
+                    removed = True
+                    break
+            if store is not None:
+                store.delete(task_id)
+            self._condition.notify_all()
+            return removed
+
+    def is_active(self, task_id: str) -> bool:
+        with self._condition:
+            return task_id in self._active
 
     def _on_done(self, store: SQLiteTaskStore, task_id: str, future: Future) -> None:
         """兜底：执行体自己会捕获业务异常，这里只接住它没接住的那些。
@@ -85,9 +190,14 @@ class TaskQueue:
             LOGGER.exception("标记任务 %s 失败时再次失败", task_id)
 
     def shutdown(self, wait: bool = False) -> None:
-        """关闭池子。未开始执行的排队任务会被取消并留在 queued 状态，
-        下次启动时由 reconcile_interrupted_tasks 重新入队。"""
-        self._closed = True
+        """wait=True drains admitted work; otherwise leave queued DB rows for recovery."""
+        with self._condition:
+            self._closed = True
+            self._drain = wait
+            if wait:
+                self._condition.wait_for(lambda: not self._pending and not self._active)
+            else:
+                self._pending.clear()
         self._executor.shutdown(wait=wait, cancel_futures=True)
 
 
@@ -134,10 +244,8 @@ def reconcile_interrupted_tasks(
         store.set_failed(task_id, INTERRUPTED_MESSAGE)
         report.marked_failed += 1
 
-    for task_id in store.task_ids_with_status(TaskStatus.queued):
-        task = store.get(task_id)
-        if task is None:
-            continue
+    for task in store.queued_for_recovery():
+        task_id = task.task_id
         if str(task.request.url).startswith(UPLOAD_URL_PREFIX):
             media_path = _recover_uploaded_file(settings, task_id)
             if media_path is None:

@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>VideoInsight Agent - 沉浸式 AI 视频分析平台</title>
   <link rel="stylesheet" href="/static/styles.css?v=20261105-platforms1" />
+  <link rel="stylesheet" href="/static/queue.css?v=20261106-used1" />
 </head>
 
 <body>
@@ -29,8 +30,8 @@
       <!-- Notion 侧边导航区 -->
       <nav>
         <div class="sidebar-section-title">工作台视图</div>
-        <a href="#workspace" class="sidebar-nav-item active">
-          <span>⚡</span> 快速分析
+        <a href="/" id="queueHomeLink" class="sidebar-nav-item active">
+          <span>⚡</span> 任务工作台
         </a>
         <a href="#agent" class="sidebar-nav-item">
           <span>🤖</span> AI Agent 助手
@@ -82,9 +83,6 @@
     <!-- ================= 2. MAIN CANVAS (PC 画布 & 移动端沉浸单列) ================= -->
     <main class="main-canvas">
 
-      <!-- 核心分析工作台 Grid (移动端自动折叠为单列) -->
-      <section id="workspace" class="workspace-grid">
-
         <div class="platform-showcase" aria-labelledby="supportedPlatformsTitle">
           <h2 id="supportedPlatformsTitle" class="platform-showcase-title">支持平台</h2>
           <ul class="platform-showcase-list" role="list">
@@ -107,6 +105,62 @@
           </ul>
         </div>
 
+      <section id="queueDashboard" aria-labelledby="queueTitle">
+        <header class="queue-heading">
+          <div><p class="queue-eyebrow">VIDEOINSIGHT / WORKSPACE</p><h1 id="queueTitle">任务工作台</h1></div>
+          <div class="queue-heading-actions">
+            <span id="queueConnection" class="queue-connection">正在连接</span>
+            <button id="queueRefresh" type="button" class="queue-icon-button" title="刷新任务队列" aria-label="刷新任务队列">&#8635;</button>
+            <a href="#workspace" class="btn queue-compose-link">新建任务</a>
+          </div>
+        </header>
+        <div class="queue-metrics" aria-label="我的任务统计">
+          <div><span>处理中</span><strong id="queueRunningCount">-</strong></div>
+          <div><span>排队中</span><strong id="queueWaitingCount">-</strong></div>
+          <div><span>已完成</span><strong id="queueDoneCount">-</strong></div>
+          <div><span>失败</span><strong id="queueFailedCount">-</strong></div>
+        </div>
+        <div class="queue-pool">
+          <div class="queue-pool-heading">
+            <h2>执行线程池</h2>
+            <span id="queueEngine" class="queue-engine">云端转写</span>
+          </div>
+          <dl class="queue-pool-config">
+            <div><dt>核心并发</dt><dd id="poolCore">-</dd></div>
+            <div><dt>最大并发</dt><dd id="poolMax">-</dd></div>
+            <div><dt>执行中</dt><dd id="poolActive">-</dd></div>
+            <div><dt>等待队列</dt><dd id="poolWaiting">-</dd></div>
+            <div><dt>全局转写并发</dt><dd id="poolAsr">-</dd></div>
+          </dl>
+          <div class="queue-pool-visual">
+            <div id="poolSlots" class="queue-pool-slots" aria-label="执行槽位"></div>
+            <div class="queue-buffer"><span>等待队列</span><progress id="poolBuffer" max="1" value="0" aria-label="等待队列占用"></progress><span id="poolBufferLabel">-</span></div>
+          </div>
+        </div>
+        <div class="queue-toolbar">
+          <div id="queueFilters" class="queue-filters" role="tablist" aria-label="任务状态筛选">
+            <button type="button" role="tab" data-queue-filter="all" aria-selected="true">全部</button>
+            <button type="button" role="tab" data-queue-filter="running" aria-selected="false">处理中</button>
+            <button type="button" role="tab" data-queue-filter="queued" aria-selected="false">排队中</button>
+            <button type="button" role="tab" data-queue-filter="succeeded" aria-selected="false">已完成</button>
+            <button type="button" role="tab" data-queue-filter="failed" aria-selected="false">失败</button>
+          </div>
+          <input id="queueSearch" class="form-input queue-search" type="search" aria-label="搜索任务" placeholder="搜索标题或链接" />
+        </div>
+        <p id="queueNotice" class="queue-notice" role="status" aria-live="polite" hidden></p>
+        <div id="queueTaskList" class="queue-task-list" role="tabpanel" aria-label="任务列表"><div class="queue-empty">正在加载任务…</div></div>
+        <div class="queue-pagination">
+          <span id="queuePageLabel">-</span>
+          <div>
+            <button id="queuePrevious" class="queue-icon-button" type="button" title="上一页" aria-label="上一页" disabled>&#8592;</button>
+            <span id="queuePageNumber">1 / 1</span>
+            <button id="queueNext" class="queue-icon-button" type="button" title="下一页" aria-label="下一页" disabled>&#8594;</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 核心分析工作台 Grid (移动端自动折叠为单列) -->
+      <section id="workspace" class="workspace-grid" aria-label="新建任务">
         <!-- 上传卡片 -->
         <div class="card-panel">
           <div class="card-header">
@@ -146,7 +200,7 @@
               </label>
             </div>
 
-            <button id="uploadSubmit" type="submit" class="btn full-width">开始分析文件</button>
+            <button id="uploadSubmit" type="submit" class="btn full-width">上传并入队</button>
           </form>
         </div>
 
@@ -189,14 +243,22 @@
               </label>
             </div>
 
-            <button id="linkSubmit" type="submit" class="btn full-width">立即链接分析</button>
+            <button id="linkSubmit" type="submit" class="btn full-width">加入处理队列</button>
           </form>
         </div>
 
       </section>
 
+      <header id="taskDetailHeader" class="task-detail-header" hidden>
+        <a href="/" id="backToQueue" class="task-back-link">&#8592; 任务队列</a>
+        <p class="queue-eyebrow">VIDEO / 视频详情</p>
+        <h1 id="taskDetailTitle">正在加载任务…</h1>
+        <p id="taskDetailMeta" class="task-detail-meta"></p>
+        <p id="taskDetailNotice" class="queue-notice" role="status" hidden></p>
+      </header>
+
       <!-- 任务进度与状态追踪卡片 -->
-      <section class="card-panel">
+      <section class="card-panel" data-task-detail>
         <div class="card-header">
           <div class="card-title"><span>⚡</span> 任务实时状态</div>
           <span id="taskStatusBadge" class="badge badge-accent">待命</span>
@@ -237,7 +299,7 @@
       </section>
 
       <!-- 媒体播放与分析结果 -->
-      <section class="card-panel">
+      <section class="card-panel" data-task-detail>
         <!-- 视频/音频播放器 (按需显示) -->
         <div id="mediaPanel" class="media-panel" hidden>
           <video id="mediaVideo" class="media-player" controls preload="metadata" hidden></video>
@@ -258,11 +320,13 @@
             <button class="tab-btn" data-target="rawOutput" type="button" role="tab">JSON 原文</button>
           </div>
           <div class="result-bar-actions">
+            <span id="taskUsedBadge" class="task-used-badge" role="status" hidden>已使用</span>
             <button id="copyPanelBtn" class="mini-btn result-action" type="button" title="复制当前视图的完整内容">复制</button>
             <button id="expandPanelBtn" class="mini-btn result-action" type="button" title="展开 / 收起完整内容"
               aria-pressed="false">展开全文</button>
           </div>
         </div>
+        <p id="copyActionMessage" class="copy-action-message" role="status" aria-live="polite" hidden></p>
 
         <!-- 输出显示框 -->
         <div id="summaryOutput" class="output-box is-prose" role="tabpanel">等待分析任务完成后显示结果...</div>
@@ -416,8 +480,14 @@
           </div>
 
           <div class="form-group">
-            <label class="form-label" for="llmModel">模型名称</label>
-            <input id="llmModel" type="text" class="form-input" placeholder="deepseek-chat" />
+            <label class="form-label" for="llmModel">模型 ID</label>
+            <input id="llmModel" type="text" class="form-input" placeholder="deepseek-flash" list="llmModelSuggestions" />
+            <datalist id="llmModelSuggestions">
+              <option value="deepseek-flash"></option>
+              <option value="deepseek-pro"></option>
+              <option value="deepseek-v4-flash"></option>
+              <option value="deepseek-v4-pro"></option>
+            </datalist>
           </div>
 
           <div class="form-group">
@@ -467,7 +537,8 @@
   </div>
 
   <script src="/static/comment-utils.js?v=20261105"></script>
-  <script src="/static/app.js?v=20261105-comments-perf1"></script>
+  <script src="/static/queue.js?v=20261106-used1"></script>
+  <script src="/static/app.js?v=20261109-model-id1"></script>
 </body>
 
 </html>

@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     error        TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
-    client_id    TEXT
+    client_id    TEXT,
+    used_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
@@ -27,6 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 
 # 老库可能没有 client_id 列：启动时执行一次轻量迁移
 _MIGRATE_CLIENT_ID = "ALTER TABLE tasks ADD COLUMN client_id TEXT"
+_MIGRATE_USED_AT = "ALTER TABLE tasks ADD COLUMN used_at TEXT"
 # client_id 索引在迁移完成后创建（避免老库缺列时建索引失败）
 _INDEX_CLIENT_ID = "CREATE INDEX IF NOT EXISTS idx_tasks_client ON tasks(client_id)"
 _INDEX_CLIENT_HISTORY = "CREATE INDEX IF NOT EXISTS idx_tasks_client_history ON tasks(client_id, created_at)"
@@ -61,10 +63,12 @@ class SQLiteTaskStore:
                 conn.close()
 
     def _migrate_if_needed(self, conn: sqlite3.Connection) -> None:
-        """老库补 client_id 列（幂等，仅当列不存在时执行），随后建索引。"""
+        """幂等补齐旧库字段，保留已有任务。"""
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()]
         if "client_id" not in columns:
             conn.execute(_MIGRATE_CLIENT_ID)
+        if "used_at" not in columns:
+            conn.execute(_MIGRATE_USED_AT)
         conn.execute(_INDEX_CLIENT_ID)
         conn.execute(_INDEX_CLIENT_HISTORY)
 
@@ -128,7 +132,7 @@ class SQLiteTaskStore:
         client_id: str | None = None,
     ) -> list[TaskSummary]:
         columns = (
-            "task_id, status, request_json, error, created_at, updated_at, "
+            "task_id, status, request_json, error, created_at, updated_at, used_at, "
             "json_extract(result_json, '$.title') AS title, "
             "json_extract(result_json, '$.media.title') AS media_title"
         )
@@ -139,6 +143,7 @@ class SQLiteTaskStore:
                 request=AnalyzeRequest.model_validate_json(row["request_json"]),
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
+                used_at=row["used_at"],
                 title=row["title"] or "",
                 media_title=row["media_title"],
                 error=row["error"],
@@ -176,6 +181,33 @@ class SQLiteTaskStore:
     def set_partial_result(self, task_id: str, result: AnalysisResult) -> None:
         self._update(task_id, result=result)
 
+    def status_counts(self, client_id: str | None) -> dict[str, int]:
+        counts = {status.value: 0 for status in TaskStatus}
+        clause = "client_id IS NULL" if client_id is None else "client_id = ?"
+        params = () if client_id is None else (client_id,)
+        with self._lock:
+            conn = self._connect()
+            try:
+                for row in conn.execute(
+                    f"SELECT status, COUNT(*) AS total FROM tasks WHERE {clause} GROUP BY status", params
+                ):
+                    counts[row["status"]] = row["total"]
+            finally:
+                conn.close()
+        return counts
+
+    def queued_for_recovery(self) -> list[TaskRecord]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM tasks WHERE status = ? ORDER BY created_at, rowid",
+                    (TaskStatus.queued.value,),
+                ).fetchall()
+            finally:
+                conn.close()
+        return [self._row_to_task(row) for row in rows]
+
     def set_running(self, task_id: str) -> None:
         self._update(task_id, status=TaskStatus.running, error=None)
 
@@ -184,6 +216,24 @@ class SQLiteTaskStore:
 
     def set_failed(self, task_id: str, error: str) -> None:
         self._update(task_id, status=TaskStatus.failed, error=error)
+
+    def mark_used(self, task_id: str, client_id: str | None) -> datetime | None:
+        """按严格归属记录首次使用时间，不干扰分析状态或结果更新。"""
+        with self._lock:
+            conn = self._connect()
+            try:
+                cursor = conn.execute(
+                    "UPDATE tasks SET used_at = COALESCE(used_at, ?) "
+                    "WHERE task_id = ? AND client_id IS ?",
+                    (datetime.now().isoformat(), task_id, client_id),
+                )
+                if not cursor.rowcount:
+                    return None
+                row = conn.execute("SELECT used_at FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+                conn.commit()
+                return datetime.fromisoformat(row["used_at"])
+            finally:
+                conn.close()
 
     def delete(self, task_id: str) -> bool:
         with self._lock:
@@ -276,6 +326,7 @@ class SQLiteTaskStore:
             request=request,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+            used_at=datetime.fromisoformat(row["used_at"]) if row["used_at"] else None,
             result=result,
             error=row["error"],
         )

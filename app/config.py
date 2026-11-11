@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -25,6 +25,13 @@ class Settings:
     results_dir: Path = Path(os.getenv("VIDEOINSIGHT_RESULTS_DIR", "data/results"))
     media_dir: Path = Path(os.getenv("VIDEOINSIGHT_MEDIA_DIR", "media"))
     db_path: Path = Path(os.getenv("VIDEOINSIGHT_DB_PATH", "data/videoinsight.db"))
+    asr_provider: str = os.getenv("ASR_PROVIDER", "paraformer")
+    groq_api_key: str | None = field(default=os.getenv("GROQ_API_KEY") or None, repr=False)
+    groq_asr_model: str = os.getenv("GROQ_ASR_MODEL", "whisper-large-v3-turbo")
+    groq_asr_chunk_seconds: int = int(os.getenv("GROQ_ASR_CHUNK_SECONDS", "300"))
+    groq_asr_max_workers: int = int(os.getenv("GROQ_ASR_MAX_WORKERS", "2"))
+    groq_asr_global_workers: int = int(os.getenv("GROQ_ASR_GLOBAL_WORKERS", "2"))
+    groq_asr_requests_per_minute: int = int(os.getenv("GROQ_ASR_REQUESTS_PER_MINUTE", "18"))
     dashscope_api_key: str | None = os.getenv("DASHSCOPE_API_KEY") or None
     dashscope_workspace_id: str | None = os.getenv("DASHSCOPE_WORKSPACE_ID") or None
     dashscope_asr_model: str = os.getenv("DASHSCOPE_ASR_MODEL", "paraformer-realtime-v2")
@@ -35,6 +42,7 @@ class Settings:
     )
     dashscope_asr_chunk_seconds: int = int(os.getenv("DASHSCOPE_ASR_CHUNK_SECONDS", "120"))
     dashscope_asr_max_workers: int = int(os.getenv("DASHSCOPE_ASR_MAX_WORKERS", "8"))
+    dashscope_asr_global_workers: int = int(os.getenv("DASHSCOPE_ASR_GLOBAL_WORKERS", "8"))
     # 抖音「转写」下载时请求的画质档位。转写只需要音轨，视频画质高低不影响识别
     # 质量，但直接影响下载体积与耗时——默认取低档（480p）可大幅缩短总耗时。
     # 设为 1080p 即恢复原行为；「下载源视频」功能不受此影响，恒用 1080p。
@@ -43,7 +51,7 @@ class Settings:
     deepseek_api_key: str | None = os.getenv("DEEPSEEK_API_KEY") or None
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
     llm_base_url: str = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
-    llm_model: str = os.getenv("LLM_MODEL", "deepseek-chat")
+    llm_model: str = os.getenv("LLM_MODEL", "deepseek-flash")
     # 服务端默认接口协议：chat_completions（默认）/ responses / messages
     llm_protocol: str = os.getenv("LLM_PROTOCOL", "chat_completions")
     ytdlp_cookies_file: Path | None = (
@@ -67,7 +75,9 @@ class Settings:
     cleanup_interval_hours: int = int(os.getenv("VIDEOINSIGHT_CLEANUP_INTERVAL_HOURS", "6"))
     # 同时执行的长任务上限。刻意有界：一个视频任务动辄十几分钟，不限并发会
     # 打满带宽/磁盘，也会撞 ASR 与 LLM 的配额。
-    max_concurrent_tasks: int = int(os.getenv("VIDEOINSIGHT_MAX_CONCURRENT_TASKS", "2"))
+    max_concurrent_tasks: int = int(os.getenv("VIDEOINSIGHT_MAX_CONCURRENT_TASKS", "4"))
+    core_task_workers: int = int(os.getenv("VIDEOINSIGHT_TASK_CORE_WORKERS", "2"))
+    task_queue_capacity: int = int(os.getenv("VIDEOINSIGHT_TASK_QUEUE_CAPACITY", "32"))
     # 共享访问令牌。未设置（默认）时不做任何鉴权校验，本地行为与之前一致；
     # 设置后除 /、/static、/health、/auth/session 外的所有请求都必须带令牌。
     auth_token: str | None = os.getenv("VIDEOINSIGHT_AUTH_TOKEN") or None
@@ -77,6 +87,15 @@ class Settings:
     # 任务记录的保留时长；<=0（默认）表示不按时间淘汰历史，只回收孤儿目录。
     # 刻意默认关闭：静默删除用户的历史记录比占点磁盘更糟。
     task_retention_hours: int = int(os.getenv("VIDEOINSIGHT_TASK_RETENTION_HOURS", "0"))
+
+    @property
+    def asr_model(self) -> str:
+        return self.groq_asr_model if self.asr_provider.strip().lower() == "groq" else self.dashscope_asr_model
+
+    @property
+    def asr_global_workers(self) -> int:
+        value = self.groq_asr_global_workers if self.asr_provider.strip().lower() == "groq" else self.dashscope_asr_global_workers
+        return max(1, value)
 
     def ensure_dirs(self) -> None:
         self.tmp_dir.mkdir(parents=True, exist_ok=True)

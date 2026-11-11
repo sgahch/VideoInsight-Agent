@@ -156,6 +156,7 @@ curl -X POST http://127.0.0.1:8000/tasks/<task_id>/chat `
 | `POST` | `/parse-link` | 从分享文案解析干净链接与标签 |
 | `GET` | `/tasks` | 历史任务列表（按客户端身份隔离） |
 | `GET` | `/tasks/{id}` | 查询任务与结果 |
+| `POST` | `/tasks/{id}/used` | 记录首次使用时间（复制成功后标记，按客户端身份隔离） |
 | `DELETE` | `/tasks/{id}` | 删除任务并清理产物 |
 | `POST` | `/tasks/{id}/chat` | 基于转写稿追问 |
 | `GET` | `/tasks/{id}/media` | 在线预览媒体（支持 Range） |
@@ -281,7 +282,26 @@ curl -o output.mp4 "http://127.0.0.1:8000/tasks/<task_id>/video?download=1"
 ## 🧵 并发与重启对账
 
 长任务不再挂在 FastAPI 的 `BackgroundTasks` 上，而是走**专用的有界线程池**
-（`VIDEOINSIGHT_MAX_CONCURRENT_TASKS`，默认 2）。
+（默认核心并发 2、最大并发 4、等待队列容量 32）。
+
+工作台展示任务状态、真实处理阶段、进度和队列位置。提交链接或上传文件后立即入队，
+点击任务进入独立的 `/view/{task_id}` 视频详情页，刷新可继续查看同一任务。
+
+调度顺序为：先使用核心执行槽位，再进入有界 FIFO 等待队列；等待队列满后，
+可扩展至最大并发。全部容量用尽时返回 `429` 和 `Retry-After`，不阻塞网页请求，
+也不会留下永远排队的任务记录。配置修改后重启生效：
+
+```env
+VIDEOINSIGHT_TASK_CORE_WORKERS=2
+VIDEOINSIGHT_MAX_CONCURRENT_TASKS=4
+VIDEOINSIGHT_TASK_QUEUE_CAPACITY=32
+DASHSCOPE_ASR_GLOBAL_WORKERS=8
+```
+
+`DASHSCOPE_ASR_MAX_WORKERS` 仍控制单条视频的分片并发；新增的全局限制控制所有
+视频合计的识别请求数，避免多个任务各自开启 8 路后叠加冲击配额。
+当前语音识别和总结调用云端接口，未启用本地 GPU 推理；NVENC 视频编码加速
+不能替代云端 ASR/LLM 加速。本次不安装本地模型、不下载模型权重。
 
 **为什么要换**，原来的做法有三个问题：
 
@@ -316,11 +336,31 @@ DASHSCOPE_API_KEY=你的 DashScope Key
 LLM_PROVIDER=deepseek
 DEEPSEEK_API_KEY=你的 DeepSeek Key
 LLM_BASE_URL=https://api.deepseek.com/v1
-LLM_MODEL=deepseek-chat
+LLM_MODEL=deepseek-flash
 ```
 
 真实链路：下载 → `ffmpeg` 转 16kHz 单声道 WAV → DashScope Paraformer 转写
-（默认超过 **900 秒**切成 **600 秒**片段，最多 **3** 路并行）→ OpenAI-compatible LLM 调用。
+（默认超过 **120 秒**切成 **120 秒**片段，最多 **8** 路并行）→ OpenAI-compatible LLM 调用。
+
+### Groq Whisper 转写
+
+可仅替换语音转写，不改变 AI 总结模型。在本机 `.env` 配置：
+
+```env
+ASR_PROVIDER=groq
+GROQ_API_KEY=你的 Groq Key
+GROQ_ASR_MODEL=whisper-large-v3-turbo
+GROQ_ASR_CHUNK_SECONDS=300
+GROQ_ASR_MAX_WORKERS=2
+GROQ_ASR_GLOBAL_WORKERS=2
+GROQ_ASR_REQUESTS_PER_MINUTE=18
+```
+
+Groq 通过现有 `httpx` 调用，不需要安装 DashScope SDK。保留逐句时间戳、分片进度和
+任务队列；默认每片 5 分钟，最多 10 分钟，转成 16kHz 单声道 WAV 后低于 25MB。
+免费账号仍受音频时长、请求频率等配额限制，请在 Groq 控制台确认账号为 Free 计划。
+项目不会代为开通付费计划，也不会在限流、额度不足或鉴权失败后回退到阿里云。
+Key 仅保存在 Git 忽略的 `.env`，不会通过健康检查或任务诊断返回。
 
 <details>
 <summary><b>常用环境变量</b></summary>
@@ -334,12 +374,15 @@ LLM_MODEL=deepseek-chat
 | `VIDEOINSIGHT_DB_PATH` | `data/videoinsight.db` | SQLite 路径 |
 | `VIDEOINSIGHT_MAX_UPLOAD_MB` | `2048` | 单个上传文件大小上限 |
 | `VIDEOINSIGHT_AUTH_TOKEN` | — | 共享访问令牌；**不设置则不鉴权**，设置后所有非公开端点都要带令牌 |
-| `VIDEOINSIGHT_MAX_CONCURRENT_TASKS` | `2` | 同时执行的长任务上限 |
+| `VIDEOINSIGHT_TASK_CORE_WORKERS` | `2` | 核心任务并发；不会超过最大并发 |
+| `VIDEOINSIGHT_MAX_CONCURRENT_TASKS` | `4` | 等待队列满时允许扩展到的最大任务并发 |
+| `VIDEOINSIGHT_TASK_QUEUE_CAPACITY` | `32` | FIFO 等待队列容量；全部占满后拒绝新提交 |
 | `VIDEOINSIGHT_CLEANUP_INTERVAL_HOURS` | `6` | 产物回收周期；`<=0` 只保留启动时那一次 |
 | `VIDEOINSIGHT_TASK_RETENTION_HOURS` | `0` | 任务记录保留时长；`0` = 永久保留历史，只回收孤儿文件 |
 | `DASHSCOPE_ASR_CHUNK_THRESHOLD_SECONDS` | `120` | 超过该时长开始并发切片；短音频也能避开单次请求固定开销 |
 | `DASHSCOPE_ASR_CHUNK_SECONDS` | `120` | 每片时长 |
 | `DASHSCOPE_ASR_MAX_WORKERS` | `8` | 并发转写路数；过高可能触发服务商限流 |
+| `DASHSCOPE_ASR_GLOBAL_WORKERS` | `8` | 所有视频合计的转写调用并发上限 |
 | `YTDLP_COOKIES_FROM_BROWSER` | — | 复用本机浏览器 Cookies，如 `chrome` / `edge` |
 | `YTDLP_COOKIES_FILE` | — | Netscape 格式 `cookies.txt` 路径 |
 | `MEDIA_CRAWLER_OUTPUT_DIR` | — | MediaCrawler 评论落盘目录 |

@@ -44,7 +44,7 @@ from app.security import (
     token_matches,
 )
 from app.task_store import task_store
-from app.task_queue import PendingTask, TaskQueue, reconcile_interrupted_tasks
+from app.task_queue import PendingTask, TaskQueue, TaskQueueFull, TaskRunning, reconcile_interrupted_tasks
 from app.workflow import detect_platform, format_duration, run_analysis_task, run_file_analysis_task
 from app.progress import get_snapshot
 from app.streaming import STREAM_HEADERS, encode_event
@@ -56,7 +56,11 @@ LOGGER = logging.getLogger(__name__)
 UPLOAD_CHUNK_BYTES = 1 << 20
 
 # 长任务走专用有界线程池，不再用 BackgroundTasks 挤占请求处理线程池。
-task_queue = TaskQueue(settings.max_concurrent_tasks)
+task_queue = TaskQueue(
+    settings.max_concurrent_tasks,
+    core_workers=settings.core_task_workers,
+    queue_capacity=settings.task_queue_capacity,
+)
 
 
 def _client_id_from_header(x_client_id: str | None = None) -> str | None:
@@ -148,13 +152,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # 并把被杀死的进程留下的僵尸任务收敛掉（running → 失败，queued → 重新入队）。
     await asyncio.to_thread(_run_artifact_cleanup)
     report = await asyncio.to_thread(reconcile_interrupted_tasks, task_store, settings)
-    for item in report.pending:
-        _resume_task(item)
+    async def resume_pending() -> None:
+        for item in report.pending:
+            while True:
+                try:
+                    _resume_task(item)
+                    break
+                except TaskQueueFull:
+                    await asyncio.sleep(0.5)
 
+    recovery_task = asyncio.create_task(resume_pending())
     cleanup_task = asyncio.create_task(_periodic_cleanup())
     try:
         yield
     finally:
+        recovery_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await recovery_task
         cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
@@ -233,11 +247,18 @@ def web_app() -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
 
 
+@app.get("/view/{task_id}", include_in_schema=False)
+def task_view(task_id: str) -> FileResponse:
+    return FileResponse(WEB_DIR / "index.html")
+
+
 @app.get("/health")
 def health() -> dict[str, object]:
     return {
         "status": "ok",
         "mock_mode": settings.mock_mode,
+        "asr_provider": settings.asr_provider,
+        "asr_model": settings.asr_model,
         # 前端据此决定是否要求用户填访问令牌
         "auth_required": settings.auth_token is not None or login_required(),
         "login_required": login_required(),
@@ -321,7 +342,11 @@ def submit_analysis(
         if not request.label and parsed.label:
             request.label = parsed.label
     task = task_store.create(request)
-    task_queue.submit(task.task_id, task_store, run_analysis_task, task.task_id, request, task_store)
+    try:
+        task_queue.submit(task.task_id, task_store, run_analysis_task, task.task_id, request, task_store)
+    except TaskQueueFull as exc:
+        task_store.delete(task.task_id)
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "3"}) from exc
     return AnalyzeResponse(
         task_id=task.task_id,
         status=task.status,
@@ -343,6 +368,7 @@ def submit_file_analysis(
 ) -> AnalyzeResponse:
     request = AnalyzeRequest(
         url=f"upload://{file.filename or 'uploaded-media'}",
+        label=file.filename,
         mode=mode,
         use_mock=use_mock,
         client_id=_client_id_from_header(x_client_id),
@@ -360,9 +386,14 @@ def submit_file_analysis(
         task_store.delete(task.task_id)
         remove_task_artifacts(settings, task.task_id)
         raise
-    task_queue.submit(
-        task.task_id, task_store, run_file_analysis_task, task.task_id, request, media_path, task_store
-    )
+    try:
+        task_queue.submit(
+            task.task_id, task_store, run_file_analysis_task, task.task_id, request, media_path, task_store
+        )
+    except TaskQueueFull as exc:
+        task_store.delete(task.task_id)
+        remove_task_artifacts(settings, task.task_id)
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "3"}) from exc
     return AnalyzeResponse(
         task_id=task.task_id,
         status=task.status,
@@ -446,6 +477,47 @@ def list_tasks(
     )
 
 
+@app.get("/queue")
+def queue_overview(
+    x_client_id: str | None = Header(default=None),
+    limit: int = Query(default=100, ge=1, le=200),
+) -> dict[str, object]:
+    client_id = _client_id_from_header(x_client_id)
+    pool = task_queue.snapshot()
+    positions = {task_id: index + 1 for index, task_id in enumerate(pool.pop("queued_task_ids"))}
+    pool.pop("active_task_ids")
+    tasks = task_store.list_summaries(limit=limit, client_id=client_id)
+    seen = {task.task_id for task in tasks}
+    for status in (TaskStatus.running, TaskStatus.queued):
+        for task in task_store.list_summaries(limit=200, status=status, client_id=client_id):
+            if task.task_id not in seen:
+                tasks.append(task)
+                seen.add(task.task_id)
+    for task in tasks:
+        if task.status == TaskStatus.running:
+            snap = get_snapshot(task.task_id, settings.results_dir)
+            if snap:
+                task.progress = snap["progress"]
+                task.stage = snap["stage"]
+        elif task.status == TaskStatus.succeeded:
+            task.progress = 100
+            task.stage = "done"
+        elif task.status == TaskStatus.queued:
+            task.queue_position = positions.get(task.task_id)
+    return {
+        "pool": pool,
+        "counts": task_store.status_counts(client_id),
+        "tasks": [task.model_dump(mode="json") for task in tasks],
+        "engine": {
+            "asr": "cloud",
+            "asr_provider": settings.asr_provider,
+            "asr_model": settings.asr_model,
+            "asr_global_workers": settings.asr_global_workers,
+            "local_gpu_inference": False,
+        },
+    }
+
+
 @app.get("/tasks/{task_id}", response_model=TaskRecord)
 def get_task(
     task_id: str,
@@ -468,6 +540,17 @@ def get_task(
             task.elapsed_seconds = snap["elapsed_seconds"]
             task.estimated_total_seconds = snap["estimated_total_seconds"]
     return task
+
+
+@app.post("/tasks/{task_id}/used")
+def mark_task_used(
+    task_id: str,
+    x_client_id: str | None = Header(default=None),
+) -> dict[str, str]:
+    used_at = task_store.mark_used(task_id, _client_id_from_header(x_client_id))
+    if used_at is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"task_id": task_id, "used_at": used_at.isoformat()}
 
 
 @app.get("/tasks/{task_id}/events")
@@ -515,7 +598,10 @@ def delete_task(
     task = _owned_task(task_id, _client_id_from_header(x_client_id))
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    task_store.delete(task_id)
+    try:
+        task_queue.cancel_pending(task_id, task_store)
+    except TaskRunning as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _remove_task_files(task_id)
 
 

@@ -120,6 +120,8 @@
     commentsOutput: $("#commentsOutput"),
     rawOutput: $("#rawOutput"),
     copyPanelBtn: $("#copyPanelBtn"),
+    taskUsedBadge: $("#taskUsedBadge"),
+    copyActionMessage: $("#copyActionMessage"),
     expandPanelBtn: $("#expandPanelBtn"),
 
     // 媒体
@@ -208,6 +210,9 @@
     parsedLink: null, // 最新的 /parse-link 解析结果（含干净 url 与建议标签）
     transcriptText: "",
     summaryText: "", // AI 总结原始 Markdown，供「复制」按钮使用
+    chatSessions: new Map(),
+    usedTasks: new Map(),
+    historySignature: null,
   };
 
   /* ======================================================================
@@ -218,6 +223,7 @@
   const ACTIVE_TASK_KEY = "videoinsight_active_task";
   let accountLoginEnabled = false;
   let serverModelConfig = null;
+  let queueView = null;
   const AUTH_TOKEN_KEY = "videoinsight_auth_token";
 
   /**
@@ -510,6 +516,7 @@
     if (!config) {
       if (serverModelConfig) return {};
       setTaskStatus("failed", "AI 总结或观点提取需要先配置 API Key；逐字稿提取无需配置。");
+      queueView?.notify("请先配置模型 API Key，或选择逐字稿提取。", true);
       setModelMessage("请先保存 API Key，再重新提交 AI 分析。逐字稿提取不需要 API Key。", "error");
       scrollToSettings();
       return null;
@@ -528,8 +535,8 @@
     const linkTranscript = els.linkMode.value === "transcript";
     els.uploadRealRow.hidden = uploadTranscript;
     els.linkRealRow.hidden = linkTranscript;
-    els.uploadSubmit.textContent = uploadTranscript ? "开始提取逐字稿" : "开始分析文件";
-    els.linkSubmit.textContent = linkTranscript ? "立即提取逐字稿" : "立即链接分析";
+    els.uploadSubmit.textContent = "上传并入队";
+    els.linkSubmit.textContent = "加入处理队列";
   }
 
   /* ======================================================================
@@ -694,19 +701,60 @@
       helper.style.position = "fixed";
       helper.style.opacity = "0";
       document.body.appendChild(helper);
-      helper.select();
-      document.execCommand("copy");
-      helper.remove();
+      try {
+        helper.select();
+        if (!document.execCommand("copy")) throw new Error("浏览器未允许写入剪贴板。");
+      } finally {
+        helper.remove();
+      }
+    }
+  }
+
+  function taskUsedAt(task) {
+    return state.usedTasks.get(task.task_id) || task.used_at || null;
+  }
+
+  function renderUsedBadge() {
+    const usedAt = state.currentTask && taskUsedAt(state.currentTask);
+    els.taskUsedBadge.hidden = !usedAt;
+    els.taskUsedBadge.title = usedAt ? `首次复制：${formatTime(usedAt)}` : "";
+  }
+
+  function copyFeedback(taskId, message, error = false) {
+    if (state.currentTaskId !== taskId) return;
+    els.copyActionMessage.textContent = message;
+    els.copyActionMessage.hidden = !message;
+    els.copyActionMessage.classList.toggle("is-error", error);
+  }
+
+  async function copyTaskText(text) {
+    const task = state.currentTask;
+    if (!task || !String(text || "").trim()) return;
+    const taskId = task.task_id;
+    try {
+      await copyToClipboard(String(text));
+    } catch (error) {
+      copyFeedback(taskId, `复制失败：${error.message} 请检查浏览器剪贴板权限后重试。`, true);
+      return;
+    }
+    try {
+      const knownUsedAt = taskUsedAt(task);
+      const usedAt = knownUsedAt || (await fetchJson(`/tasks/${taskId}/used`, { method: "POST" }, 10000)).used_at;
+      state.usedTasks.set(taskId, usedAt);
+      if (state.currentTaskId === taskId) {
+        state.currentTask.used_at = usedAt;
+        renderUsedBadge();
+      }
+      queueView?.onTaskUsed(taskId, usedAt);
+      copyFeedback(taskId, "已复制");
+    } catch (error) {
+      copyFeedback(taskId, `文本已复制，但“已使用”标记保存失败：${error.message} 请再次点击复制重试。`, true);
     }
   }
 
   async function copyTranscript() {
     if (!state.transcriptText) return;
-    await copyToClipboard(state.transcriptText);
-    els.transcriptCopyStatus.textContent = "已复制";
-    window.setTimeout(() => {
-      els.transcriptCopyStatus.textContent = "";
-    }, 1800);
+    await copyTaskText(state.transcriptText);
   }
 
   /* ---------- 结果区视图操作：复制 / 展开全文 ---------- */
@@ -735,15 +783,17 @@
   }
 
   async function copyActivePanel() {
+    const result = state.currentTask?.result;
+    const available = {
+      summaryOutput: Boolean(state.summaryText),
+      transcriptOutput: Boolean(state.transcriptText),
+      commentsOutput: Boolean(result?.comments?.length),
+      rawOutput: Boolean(result),
+    };
+    if (!available[activePanelId()]) return;
     const text = (PANEL_TEXT[activePanelId()] || (() => ""))();
     if (!String(text || "").trim()) return;
-    await copyToClipboard(String(text));
-    if (els.copyPanelBtn) {
-      els.copyPanelBtn.textContent = "已复制";
-      window.setTimeout(() => {
-        els.copyPanelBtn.textContent = "复制";
-      }, 1600);
-    }
+    await copyTaskText(text);
   }
 
   function toggleActivePanel() {
@@ -765,17 +815,36 @@
 
   /** 把后端返回的 TaskRecord 渲染到页面上。 */
   function applyTask(task) {
+    task = { ...task, used_at: taskUsedAt(task) };
     const previous = state.currentTask;
     const switched = state.renderedTaskId !== task.task_id;
     if (switched) {
+      if (state.chatController) {
+        state.chatController.abort();
+        state.chatController = null;
+        setChatBusy(false);
+      }
+      els.chatMessages.querySelectorAll(".is-thinking").forEach((node) => {
+        node.classList.remove("is-thinking");
+        node.textContent = "已停止生成。";
+      });
+      if (state.renderedTaskId) state.chatSessions.set(state.renderedTaskId, els.chatMessages.innerHTML);
+      if (state.chatSessions.size > 20) state.chatSessions.delete(state.chatSessions.keys().next().value);
+      els.chatMessages.innerHTML = state.chatSessions.get(task.task_id) || WELCOME_HTML;
+      els.chatInput.value = "";
       state.transcriptText = "";
       state.summaryText = "";
       renderTranscript("");
       els.commentsOutput.textContent = "暂无观众评论";
+      els.copyActionMessage.hidden = true;
+      els.copyActionMessage.textContent = "";
+      els.transcriptCopyStatus.textContent = "";
     }
     state.currentTask = task;
     state.currentTaskId = task.task_id;
     state.renderedTaskId = task.task_id;
+    renderUsedBadge();
+    queueView?.onTask(task);
     rememberTask(task.task_id);
 
     els.taskId.textContent = task.task_id;
@@ -1045,6 +1114,8 @@
     state.renderedTaskId = null;
     state.mediaKey = null;
     state.pendingCookieRetry = null;
+    renderUsedBadge();
+    els.copyActionMessage.hidden = true;
 
     // 任务状态卡片回到待命
     els.taskStatusBadge.className = "badge badge-muted";
@@ -1178,6 +1249,7 @@
     const file = els.mediaFile.files && els.mediaFile.files[0];
     if (!file) {
       setTaskStatus("failed", "请先选择一个音频或视频文件。");
+      queueView?.notify("请先选择一个音频或视频文件。", true);
       return;
     }
 
@@ -1199,9 +1271,10 @@
     try {
       const data = await fetchJson("/analyze-file", { method: "POST", body: form }, 60000);
       els.taskSource.textContent = file.name;
-      startPolling(data.task_id);
+      await queueView.onSubmitted(data.task_id);
     } catch (error) {
       setTaskStatus("failed", `提交失败：${error.message}`);
+      queueView?.notify(`提交失败：${error.message}`, true);
     } finally {
       els.uploadSubmit.disabled = false;
       syncAnalysisModeUi();
@@ -1211,6 +1284,7 @@
   async function startLinkAnalysis({ url, mode, useMock, label }, automaticRetry = false) {
     if (!url) {
       setTaskStatus("failed", "请输入视频链接。");
+      queueView?.notify("请输入视频链接。", true);
       return;
     }
 
@@ -1243,9 +1317,10 @@
         automaticRetry ? "Cookies 已刷新，链接任务已自动重新提交。" : "链接任务已提交。",
         "ok",
       );
-      startPolling(data.task_id);
+      await queueView.onSubmitted(data.task_id);
     } catch (error) {
       setTaskStatus("failed", `提交失败：${error.message}`);
+      queueView?.notify(`提交失败：${error.message}`, true);
     } finally {
       els.linkSubmit.disabled = false;
       syncAnalysisModeUi();
@@ -1321,19 +1396,9 @@
    * 7. 历史任务
    * ==================================================================== */
 
-  /** 加载最近 50 条任务。 */
+  /** 侧栏与工作台共用轻量队列快照，避免独立轮询产生陈旧状态。 */
   async function loadHistory() {
-    try {
-      const tasks = await fetchJson("/tasks?limit=50&view=summary", {}, 10000);
-      renderHistory(tasks);
-    } catch (error) {
-      els.historyList.innerHTML = "";
-      const empty = document.createElement("div");
-      empty.className = "history-empty";
-      empty.textContent = "历史任务加载失败。";
-      els.historyList.appendChild(empty);
-      els.historyMessage.textContent = error.message;
-    }
+    await queueView?.refresh(true);
   }
 
   /** 计算任务的显示标题：优先 AI 摘要标题，其次媒体标题，最后模式名。 */
@@ -1349,11 +1414,24 @@
       return mediaTitle.trim();
     }
     const mode = task.request && task.request.mode;
+    if (task.request?.label) return task.request.label;
+    if (task.request?.url?.startsWith("upload://")) return task.request.url.slice(9);
     return MODE_TEXT[mode] || mode || "任务";
   }
 
   /** 渲染历史任务列表。 */
   function renderHistory(tasks) {
+    for (const task of tasks) {
+      if (task.used_at) state.usedTasks.set(task.task_id, task.used_at);
+    }
+    renderUsedBadge();
+    const signature = JSON.stringify(tasks.map((task) => [
+      task.task_id, task.status, taskDisplayTitle(task), task.request?.label,
+      task.request?.url, task.created_at, taskUsedAt(task),
+    ]));
+    els.historyMessage.textContent = tasks.length ? `共 ${tasks.length} 条（最多显示最近 50 条）` : "";
+    if (signature === state.historySignature) return;
+    state.historySignature = signature;
     els.historyList.innerHTML = "";
 
     if (!tasks.length) {
@@ -1392,6 +1470,14 @@
       meta.className = "history-mini-meta";
       const time = document.createElement("span");
       time.textContent = formatTime(task.created_at);
+      const usedAt = taskUsedAt(task);
+      if (usedAt) {
+        const used = document.createElement("span");
+        used.className = "task-used-badge";
+        used.textContent = "已使用";
+        used.title = `首次复制：${formatTime(usedAt)}`;
+        meta.append(used);
+      }
       const del = document.createElement("button");
       del.type = "button";
       del.className = "history-delete";
@@ -1400,7 +1486,8 @@
         event.stopPropagation();
         deleteHistoryTask(task.task_id);
       });
-      meta.append(time, del);
+      meta.prepend(time);
+      meta.append(del);
 
       item.append(top, url, meta);
       item.addEventListener("click", () => openHistoryTask(task.task_id));
@@ -1419,6 +1506,7 @@
 
   /** 回看某个历史任务。 */
   async function openHistoryTask(taskId) {
+    queueView?.showDetail(taskId);
     stopPolling();
     const version = state.watchVersion;
     try {
@@ -1433,8 +1521,10 @@
       if (error.status === 404) {
         rememberTask(null);
         setTaskStatus("failed", "任务不存在或已被删除。");
+        queueView?.onTaskError("任务不存在、已被删除或不属于当前浏览器。");
       } else if ([401, 403].includes(error.status)) {
         els.taskMessage.textContent = "登录或访问令牌已失效，请重新验证。";
+        queueView?.onTaskError(els.taskMessage.textContent);
       } else {
         startPolling(taskId);
         els.taskMessage.textContent = "连接暂时中断，正在恢复任务状态。";
@@ -1455,6 +1545,7 @@
         state.currentTask = null;
         rememberTask(null);
         updateAgentContext();
+        queueView?.showHome();
       }
       await loadHistory();
     } catch (error) {
@@ -1896,7 +1987,7 @@
 
   const MODEL_CONFIG_KEY = "videoinsight_llm_config";
   const PROVIDER_DEFAULTS = {
-    deepseek: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", protocol: "chat_completions" },
+    deepseek: { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-flash", protocol: "chat_completions" },
     openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", protocol: "chat_completions" },
     custom: { baseUrl: "", model: "", protocol: "chat_completions" },
   };
@@ -1962,6 +2053,21 @@
     els.modelState.title = config.baseUrl || "";
   }
 
+  /** Validate display names only for the official endpoint; gateways may use aliases. */
+  function validateModelId(baseUrl, model) {
+    try {
+      const url = new URL(/^https?:\/\//i.test(baseUrl) ? baseUrl : `https://${baseUrl}`);
+      if (url.hostname === "api.deepseek.com" && /\s/.test(model)) {
+        setModelMessage("模型名称请填 deepseek-flash 或 deepseek-v4-flash，不能填 DeepSeek V4 Flash 这样的显示名称。", "error");
+        els.llmModel.focus();
+        return false;
+      }
+    } catch (error) {
+      // URL validation remains the responsibility of the request layer.
+    }
+    return true;
+  }
+
   /** 保存表单配置到 localStorage。 */
   function saveModelConfig() {
     const provider = els.llmProvider.value;
@@ -1975,6 +2081,9 @@
     }
     if (provider === "custom" && !baseUrl) {
       setModelMessage("自定义服务商需要填写 API Base URL。", "error");
+      return;
+    }
+    if (!validateModelId(baseUrl, model)) {
       return;
     }
     try {
@@ -2004,6 +2113,9 @@
     }
     if (apiKey && !baseUrl) {
       setModelMessage("请先填写 API Base URL（多数中转站需以 /v1 结尾）。", "error");
+      return;
+    }
+    if (apiKey && !validateModelId(baseUrl, model)) {
       return;
     }
     const originalText = els.testModelConfig.textContent;
@@ -2183,6 +2295,7 @@
     // 鉴权通过后把之前失败的请求补上
     await refreshCookieStatus();
     await loadHistory();
+    queueView?.start();
   }
 
   async function clearAuthToken() {
@@ -2273,7 +2386,17 @@
 
   function bindSidebarNav() {
     document.querySelectorAll(".sidebar-nav-item").forEach((item) => {
-      item.addEventListener("click", () => {
+      item.addEventListener("click", (event) => {
+        if (item.getAttribute("href") === "#agent" && document.body.dataset.view !== "detail") {
+          event.preventDefault();
+          if (state.currentTaskId) {
+            openHistoryTask(state.currentTaskId).then(() => document.getElementById("agent").scrollIntoView({ block: "start" }));
+          } else {
+            queueView?.notify("请先打开一条视频任务。");
+            document.getElementById("queueDashboard").scrollIntoView({ block: "start" });
+            return;
+          }
+        }
         document.querySelectorAll(".sidebar-nav-item").forEach((nav) => nav.classList.remove("active"));
         item.classList.add("active");
       });
@@ -2351,7 +2474,11 @@
     els.captureCookieBrowser.addEventListener("click", captureCookieBrowser);
 
     els.sendChatBtn.addEventListener("click", () => sendChat(els.chatInput.value));
-    els.newChatBtn.addEventListener("click", resetCurrentSession);
+    els.newChatBtn.addEventListener("click", () => {
+      resetCurrentSession();
+      queueView?.showHome();
+      els.videoUrl.focus();
+    });
     els.copyTranscriptBtn.addEventListener("click", copyTranscript);
     els.chatInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
@@ -2388,10 +2515,28 @@
 
   /** 页面初始化。 */
   async function boot() {
-    const initialWatchVersion = state.watchVersion;
     bindEvents();
+    queueView = window.VideoQueue.create({
+      fetchJson,
+      openTask: openHistoryTask,
+      stopWatching: stopPolling,
+      title: taskDisplayTitle,
+      usedAt: taskUsedAt,
+      onTasks: renderHistory,
+      onRefreshError: (error) => {
+        els.historyMessage.textContent = `状态更新暂时中断，正在重试：${error.message}`;
+      },
+      retry: (task) => startLinkAnalysis({
+        url: task.request.url,
+        mode: task.request.mode,
+        useMock: task.request.use_mock,
+        label: task.request.label,
+      }),
+    });
+    queueView.prepare();
     updateAgentContext();
     await refreshServiceState();
+    queueView.start();
     try {
       const config = await fetchJson("/config");
       if (config.llm.configured) {
@@ -2403,13 +2548,7 @@
         updateAgentContext();
       }
     } catch (error) { /* Service state already reports connection errors. */ }
-    await Promise.allSettled([refreshCookieStatus(), loadHistory()]);
-    try {
-      const saved = JSON.parse(localStorage.getItem(ACTIVE_TASK_KEY) || "null");
-      if (saved && saved.clientId === getClientId() && saved.taskId && state.watchVersion === initialWatchVersion) {
-        await openHistoryTask(saved.taskId);
-      }
-    } catch (error) { /* Storage may be disabled or contain an older value. */ }
+    await refreshCookieStatus().catch(() => {});
   }
 
   boot();

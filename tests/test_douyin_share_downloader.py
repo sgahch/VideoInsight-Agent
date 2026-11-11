@@ -119,6 +119,23 @@ def _patch_stream(monkeypatch, chunks_by_url: dict[str, list[bytes]]) -> None:
     monkeypatch.setattr(downloader_module.httpx, "stream", fake_stream)
 
 
+def _patch_fetch_sequence(monkeypatch, responses: list[FakeResponse | Exception]):
+    sequence = iter(responses)
+    calls = []
+    waits = []
+
+    def get(url, **kwargs):
+        calls.append(url)
+        response = next(sequence)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(downloader_module.httpx, "get", get)
+    monkeypatch.setattr(downloader_module, "sleep", waits.append)
+    return calls, waits
+
+
 def _big_bytes(size: int = 64 * 1024) -> bytes:
     return b"x" * size
 
@@ -204,12 +221,74 @@ def test_fetch_item_without_data_raises_friendly_error(cookies_env, monkeypatch,
         downloader._fetch_item(VIDEO_ID)
 
 
-def test_fetch_item_without_router_data_raises(cookies_env, monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(downloader_module.httpx, "get", lambda *a, **k: FakeResponse("<html>empty</html>"))
+def test_fetch_item_without_router_data_has_bounded_retries(cookies_env, monkeypatch, tmp_path: Path) -> None:
+    calls, waits = _patch_fetch_sequence(monkeypatch, [FakeResponse("<html>empty</html>")] * 3)
     downloader = DouyinShareDownloader(tmp_path)
 
-    with pytest.raises(WorkflowError, match="_ROUTER_DATA"):
+    with pytest.raises(WorkflowError, match="已尝试 3 次") as caught:
         downloader._fetch_item(VIDEO_ID)
+    assert "结构变化" not in str(caught.value)
+    assert "稍后重试" in str(caught.value)
+    assert len(calls) == 3
+    assert waits == [1, 2]
+
+
+@pytest.mark.parametrize("initial", [
+    FakeResponse("<html>loading</html>"),
+    FakeResponse("<script>window._ROUTER_DATA = {truncated</script>"),
+    FakeResponse("<html>temporarily unavailable</html>", 503),
+    downloader_module.httpx.ReadTimeout("temporary timeout"),
+])
+def test_fetch_item_recovers_transient_failures(initial, cookies_env, monkeypatch, tmp_path: Path) -> None:
+    calls, waits = _patch_fetch_sequence(monkeypatch, [initial, FakeResponse(_share_page_html(_share_item()))])
+    item = DouyinShareDownloader(tmp_path)._fetch_item(VIDEO_ID)
+    assert item["desc"] == "测试视频标题"
+    assert len(calls) == 2
+    assert waits == [1]
+
+
+def test_fetch_item_network_failures_stop_at_limit(cookies_env, monkeypatch, tmp_path: Path) -> None:
+    calls, waits = _patch_fetch_sequence(monkeypatch, [downloader_module.httpx.ConnectError("offline")] * 3)
+    with pytest.raises(WorkflowError, match="已尝试 3 次"):
+        DouyinShareDownloader(tmp_path)._fetch_item(VIDEO_ID)
+    assert len(calls) == 3
+    assert waits == [1, 2]
+
+
+@pytest.mark.parametrize(("status", "message"), [(401, "登录"), (403, "验证"), (429, "访问频率"), (404, "404")])
+def test_fetch_item_does_not_repeat_explicit_denials(status, message, cookies_env, monkeypatch, tmp_path: Path) -> None:
+    calls, waits = _patch_fetch_sequence(monkeypatch, [FakeResponse("<html>denied</html>", status)])
+    with pytest.raises(WorkflowError, match=message):
+        DouyinShareDownloader(tmp_path)._fetch_item(VIDEO_ID)
+    assert len(calls) == 1
+    assert waits == []
+
+
+def test_fetch_item_reports_manual_verification_without_retry(cookies_env, monkeypatch, tmp_path: Path) -> None:
+    calls, waits = _patch_fetch_sequence(monkeypatch, [FakeResponse("<html><title>抖音安全验证</title></html>")])
+    with pytest.raises(WorkflowError, match="手动完成验证"):
+        DouyinShareDownloader(tmp_path)._fetch_item(VIDEO_ID)
+    assert len(calls) == 1
+    assert waits == []
+
+
+def test_fetch_item_allows_script_after_json_assignment(cookies_env, monkeypatch, tmp_path: Path) -> None:
+    html = _share_page_html(_share_item()).replace("</script>", "; window.hydrated = true;</script>")
+    _patch_fetch_sequence(monkeypatch, [FakeResponse(html)])
+    item = DouyinShareDownloader(tmp_path)._fetch_item(VIDEO_ID)
+    assert item["desc"] == "测试视频标题"
+
+
+@pytest.mark.parametrize("data", [None, [], "loading", {"loaderData": []}, {"loaderData": None}])
+def test_share_page_rejects_invalid_data_shapes(data, tmp_path: Path) -> None:
+    html = "<script>window._ROUTER_DATA = " + json.dumps(data) + ";</script>"
+    assert DouyinShareDownloader(tmp_path)._item_from_share_page(html, VIDEO_ID) is None
+
+
+def test_share_page_does_not_use_another_videos_data(tmp_path: Path) -> None:
+    item = {**_share_item(), "aweme_id": "1111111111111111111"}
+    with pytest.raises(WorkflowError, match="未返回视频数据"):
+        DouyinShareDownloader(tmp_path)._item_from_share_page(_share_page_html(item), VIDEO_ID)
 
 
 # --------------------------------------------------------------------------- download flow

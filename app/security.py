@@ -40,7 +40,7 @@ AUTH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60
 # - /health：探活
 # - /auth/session：它自己负责校验令牌并换成 Cookie
 PUBLIC_PATHS = frozenset({"/", "/login", "/health", "/auth/session", "/auth/login", "/auth/logout", "/auth/me"})
-PUBLIC_PREFIXES = ("/static/",)
+PUBLIC_PREFIXES = ("/static/", "/view/")
 
 UNAUTHORIZED_DETAIL = "未授权：缺少或无效的访问令牌。"
 
@@ -73,7 +73,7 @@ async def auth_middleware(request: Request, call_next) -> Response:
     """未配置令牌 → 全放行；配置了 → 默认拒绝 + 白名单。"""
     expected = settings.auth_token
     account_enabled = login_required()
-    if account_enabled and request.url.path in {"/", "/comments"} and not authenticated(request):
+    if account_enabled and (request.url.path in {"/", "/comments"} or request.url.path.startswith("/view/")) and not authenticated(request):
         return RedirectResponse("/login", status_code=303)
     if expected is None and not account_enabled:
         return await call_next(request)

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
 
-from app.adapters.asr import MockTranscriber, ParaformerTranscriber, format_transcript
+from app.adapters.asr import format_transcript, select_transcriber
 from app.adapters.comment_fetcher import fetch_comments_for_url
 from app.comments_api import start_for_analysis
 from app.adapters.downloader import select_downloader
@@ -308,7 +308,7 @@ def analyze(
     reporter = ProgressReporter(task_id, request.mode.value, bool(use_mock)) if not use_mock else None
 
     downloader = select_downloader(str(request.url), runtime_settings.tmp_dir, use_mock)
-    transcriber = MockTranscriber() if use_mock else ParaformerTranscriber(runtime_settings)
+    transcriber = select_transcriber(runtime_settings, bool(use_mock))
     llm = _select_llm(request, use_mock, runtime_settings)
 
     # 观众评论抓取（可选、可降级）：不阻断主链路。
@@ -370,6 +370,8 @@ def analyze(
         comments=comments or None,
         diagnostics={
             "mock_mode": use_mock,
+            "asr_provider": "mock" if use_mock else runtime_settings.asr_provider,
+            "asr_model": "mock" if use_mock else runtime_settings.asr_model,
             "comments_source": comments_source,
             "comment_job_id": comment_job_id,
             "comment_count": len(comments),
@@ -423,7 +425,7 @@ def analyze_media_file(
         # 上传文件已经在请求阶段落盘，不应把固定的“下载耗时”算进 ETA。
         reporter.mark_download_done(None)
 
-    transcriber = MockTranscriber() if use_mock else ParaformerTranscriber(runtime_settings)
+    transcriber = select_transcriber(runtime_settings, bool(use_mock))
     llm = _select_llm(request, use_mock, runtime_settings)
 
     asr_start = perf_counter()
@@ -458,6 +460,8 @@ def analyze_media_file(
         media=media_info,
         diagnostics={
             "mock_mode": use_mock,
+            "asr_provider": "mock" if use_mock else runtime_settings.asr_provider,
+            "asr_model": "mock" if use_mock else runtime_settings.asr_model,
             "source": "upload",
             "media_duration_seconds": round(media_duration, 2) if media_duration is not None else None,
             "transcribe_seconds": round(transcribe_seconds, 2),

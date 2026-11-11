@@ -36,6 +36,8 @@ def sign_in(client):
 def test_anonymous_page_redirects_and_api_is_protected(client):
     assert client.get("/", follow_redirects=False).headers["location"] == "/login"
     assert client.get("/comments", follow_redirects=False).headers["location"] == "/login"
+    assert client.get("/view/example-task", follow_redirects=False).headers["location"] == "/login"
+    assert client.get("/queue").status_code == 401
     assert client.get("/comment-api/platforms").status_code == 401
     assert client.get("/login").status_code == 200
     assert client.get("/health").json()["login_required"] is True

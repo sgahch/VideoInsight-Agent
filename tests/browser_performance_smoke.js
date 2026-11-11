@@ -48,16 +48,22 @@ async (page) => {
       if (url.pathname === "/config") {
         return json({ llm: { configured: true, provider: "mock", model: "test-model", protocol: "chat_completions" } });
       }
-      if (!url.pathname.startsWith("/tasks")) return nativeFetch(input, options);
+      if (!url.pathname.startsWith("/tasks") && url.pathname !== "/queue") return nativeFetch(input, options);
       const headers = new Headers(options.headers);
       if (headers.get("X-Client-Id") !== "perf-owner" || headers.get("Authorization") !== "Bearer perf-token") {
         throw new Error("Stream/list request lost its identity or authorization header");
       }
-      if (url.pathname === "/tasks") {
-        if (url.searchParams.get("view") !== "summary") throw new Error("History fetched full results");
+      if (url.pathname === "/queue" || url.pathname === "/tasks") {
+        if (url.pathname === "/tasks" && url.searchParams.get("view") !== "summary") throw new Error("History fetched full results");
         fixture.summaryRequests += 1;
         const { result: ignored, ...summary } = fixture.task;
-        return json([{ ...summary, title: "Performance check" }]);
+        const tasks = [{ ...summary, title: "Performance check" }];
+        return json(url.pathname === "/tasks" ? tasks : {
+          tasks,
+          counts: { running: fixture.task.status === "running" ? 1 : 0, queued: 0, succeeded: fixture.task.status === "succeeded" ? 1 : 0, failed: 0 },
+          pool: { core_workers: 2, max_workers: 4, active_workers: 1, queued: 0, queue_capacity: 32 },
+          engine: { asr_global_workers: 8 },
+        });
       }
       if (url.pathname.endsWith("/chat/stream")) {
         fixture.chatCalls += 1;
@@ -98,7 +104,7 @@ async (page) => {
     };
   });
   await page.setViewportSize({ width: 1440, height: 1100 });
-  await page.goto("http://127.0.0.1:8001/");
+  await page.goto("http://127.0.0.1:8001/view/perf-stream");
   await page.waitForFunction(() => document.querySelector("#summaryOutput").textContent.includes("Partial summary."));
   if ((await page.locator("#taskStatusBadge").textContent()).includes("已完成")) throw new Error("Partial result arrived too late");
   if (!(await page.locator("#transcriptOutput").textContent()).includes("First segment")) throw new Error("Transcript was not shown early");
@@ -139,5 +145,5 @@ async (page) => {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
   if (overflow) throw new Error("Mobile horizontal overflow");
   if (errors.length) throw new Error(errors.join("\n"));
-  console.log(JSON.stringify({ passed: ["early transcript", "incremental summary", "refresh resume", "network recovery", "streamed chat", "partial chat failure", "scoped headers", "lightweight history", "mobile layout"], pageErrors: errors }));
+  return { passed: ["early transcript", "incremental summary", "refresh resume", "network recovery", "streamed chat", "partial chat failure", "scoped headers", "lightweight history", "mobile layout"], pageErrors: errors };
 }

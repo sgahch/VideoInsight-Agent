@@ -19,6 +19,8 @@ from app.task_store import SQLiteTaskStore
 TOKEN = "s3cret-token"
 PROTECTED_ENDPOINTS = [
     ("GET", "/tasks"),
+    ("GET", "/queue"),
+    ("POST", "/tasks/example-task/used"),
     ("GET", "/docs"),
     ("POST", "/parse-link"),
     ("POST", "/analyze"),
@@ -69,6 +71,7 @@ def test_health_stays_public_when_auth_enabled(secured) -> None:
     assert client.get("/health").status_code == 200
     assert client.get("/health").json()["auth_required"] is True
     assert client.get("/").status_code == 200
+    assert client.get("/view/example-task").status_code == 200
     assert client.get("/static/app.js").status_code == 200
 
 

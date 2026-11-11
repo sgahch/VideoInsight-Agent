@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from pathlib import Path
 from time import sleep
+from typing import TYPE_CHECKING
 
 from app.adapters.audio import (
     FfmpegAudioPreprocessor,
@@ -19,8 +20,69 @@ from app.config import Settings
 from app.errors import ExternalDependencyError, WorkflowError
 from app.schemas import TranscriptSegment
 
+if TYPE_CHECKING:
+    from app.adapters.groq_asr import GroqTranscriber
+
 
 LOGGER = logging.getLogger(__name__)
+_ASR_GATES: dict[int, threading.BoundedSemaphore] = {}
+_ASR_GATES_LOCK = threading.Lock()
+
+
+def _recognition_gate(limit: int) -> threading.BoundedSemaphore:
+    with _ASR_GATES_LOCK:
+        if limit not in _ASR_GATES:
+            _ASR_GATES[limit] = threading.BoundedSemaphore(limit)
+        return _ASR_GATES[limit]
+
+
+class _RecognitionError(WorkflowError):
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def _recognition_error(result: object, settings: Settings) -> _RecognitionError:
+    code = str(getattr(result, "code", "") or "")
+    message = str(getattr(result, "message", "") or "服务未返回错误详情")
+    status = getattr(result, "status_code", None)
+    lower_code = code.casefold()
+    lower_message = message.casefold()
+    retryable = status in (408, 429, 500, 502, 503, 504)
+
+    if lower_code == "arrearage" or "account is in good standing" in lower_message:
+        detail = (
+            "ASR 账号计费状态异常。请检查 DASHSCOPE_API_KEY 所属阿里云账号的欠费和余额状态；"
+            "若账务正常，请确认 Key 所属账号或联系阿里云支持。"
+        )
+        retryable = False
+    elif lower_code == "accessdenied.unpurchased" or "access to model denied" in lower_message:
+        detail = (
+            "ASR 模型访问被拒绝。请用 DASHSCOPE_API_KEY 所属主账号检查是否已开通阿里云百炼服务，"
+            "并核对模型调用权限、地域和业务空间。修改 AI 总结模型配置不会改变 ASR 权限。"
+        )
+        retryable = False
+    elif status == 401 or lower_code in ("invalidapikey", "invalid_api_key"):
+        detail = "ASR API Key 鉴权失败。请检查 DASHSCOPE_API_KEY 是否有效，以及 Key 与服务地域是否匹配。"
+        retryable = False
+    elif status == 403 or lower_code in ("model.accessdenied", "workspace.accessdenied", "accessdenied"):
+        detail = "ASR 调用权限不足。请检查 DASHSCOPE_API_KEY 所属账号的模型权限、业务空间和服务开通状态。"
+        retryable = False
+    else:
+        detail = f"ASR 识别失败：{message}"
+
+    context = [f"模型：{settings.dashscope_asr_model}"]
+    if status is not None:
+        context.append(f"HTTP：{status}")
+    if code:
+        context.append(f"错误码：{code}")
+    request_id = getattr(result, "request_id", None)
+    if request_id:
+        context.append(f"Request ID：{request_id}")
+    text = f"{detail}（{'；'.join(context)}）"
+    if settings.dashscope_api_key:
+        text = text.replace(settings.dashscope_api_key, "[REDACTED]")
+    return _RecognitionError(text, retryable=retryable)
 
 
 class MockTranscriber:
@@ -43,6 +105,21 @@ class MockTranscriber:
         ]
 
 
+def select_transcriber(
+    settings: Settings, use_mock: bool,
+) -> MockTranscriber | ParaformerTranscriber | GroqTranscriber:
+    if use_mock:
+        return MockTranscriber()
+    provider = settings.asr_provider.strip().lower()
+    if provider == "paraformer":
+        return ParaformerTranscriber(settings)
+    if provider == "groq":
+        from app.adapters.groq_asr import GroqTranscriber
+
+        return GroqTranscriber(settings)
+    raise ExternalDependencyError("ASR_PROVIDER 配置无效，仅支持 paraformer 或 groq。")
+
+
 class ParaformerTranscriber:
     def __init__(self, settings: Settings, preprocessor: FfmpegAudioPreprocessor | None = None) -> None:
         self.settings = settings
@@ -51,6 +128,8 @@ class ParaformerTranscriber:
         self.last_duration: float | None = None
         # 当前转写任务 id（供分片进度回调回传，避免层层透传参数）。
         self._current_task_id: str | None = None
+        self._terminal_error: _RecognitionError | None = None
+        self._terminal_error_lock = threading.Lock()
 
     def transcribe(
         self,
@@ -62,6 +141,9 @@ class ParaformerTranscriber:
             raise WorkflowError("ASR 需要音频文件，但下载模块未返回音频路径。")
         if not self.settings.dashscope_api_key:
             raise ExternalDependencyError("未配置 DASHSCOPE_API_KEY，无法调用 Paraformer ASR。")
+
+        with self._terminal_error_lock:
+            self._terminal_error = None
 
         try:
             import dashscope
@@ -99,6 +181,9 @@ class ParaformerTranscriber:
                 return self._transcribe_concurrent(
                     audio_path, task_id, Recognition, chunk_seconds, reporter
                 )
+            except _RecognitionError:
+                # 转码无法修复云端鉴权、计费或服务错误，避免再次上传整段音频。
+                raise
             except WorkflowError as exc:
                 LOGGER.warning("ffmpeg 并发分片识别失败，回退整文件转码方案：%s", exc)
                 return self._transcribe_legacy(audio_path, task_id, Recognition, reporter)
@@ -117,20 +202,30 @@ class ParaformerTranscriber:
         return segments
 
     def _recognize_file(self, wav_path: Path, recognition_class: object) -> list[TranscriptSegment]:
-        recognition = recognition_class(
-            model=self.settings.dashscope_asr_model,
-            format="wav",
-            sample_rate=16000,
-            language_hints=["zh", "en"],
-            callback=None,
-        )
-        last_error: Exception | None = None
+        last_error: _RecognitionError | None = None
         # 并发调高后可能撞 DashScope 限流（429/503），退避后重试，避免整段转写白做。
         for attempt in range(3):
-            result = recognition.call(str(wav_path))
-            if result.status_code == HTTPStatus.OK:
-                return _result_to_segments(result)
-            last_error = WorkflowError(f"ASR 识别失败：{result.message}")
+            with _recognition_gate(max(1, self.settings.dashscope_asr_global_workers)):
+                with self._terminal_error_lock:
+                    if self._terminal_error is not None:
+                        raise self._terminal_error
+                recognition = recognition_class(
+                    model=self.settings.dashscope_asr_model,
+                    format="wav",
+                    sample_rate=16000,
+                    language_hints=["zh", "en"],
+                    callback=None,
+                )
+                result = recognition.call(str(wav_path))
+                if result.status_code == HTTPStatus.OK:
+                    return _result_to_segments(result)
+                last_error = _recognition_error(result, self.settings)
+                if not last_error.retryable:
+                    # 同一视频的其余分片共享终止原因；已在途请求结束后不再发起新调用。
+                    with self._terminal_error_lock:
+                        if self._terminal_error is None:
+                            self._terminal_error = last_error
+                        raise self._terminal_error
             if attempt < 2:
                 sleep(1.0 * (attempt + 1))
         assert last_error is not None
@@ -237,7 +332,7 @@ class ParaformerTranscriber:
                 if reporter is not None:
                     reporter.on_transcribe_chunk(done, total)
         finally:
-            executor.shutdown(wait=False)
+            executor.shutdown(wait=True, cancel_futures=True)
             for chunk_path in chunk_paths:
                 _best_effort_unlink(chunk_path)
 
@@ -263,11 +358,15 @@ class ParaformerTranscriber:
             futures = [executor.submit(recognize_chunk, item) for item in enumerate(chunk_paths)]
             done = 0
             total = max(1, len(futures))
-            for future in as_completed(futures):
-                results.append(future.result())
-                done += 1
-                if reporter is not None:
-                    reporter.on_transcribe_chunk(done, total)
+            try:
+                for future in as_completed(futures):
+                    results.append(future.result())
+                    done += 1
+                    if reporter is not None:
+                        reporter.on_transcribe_chunk(done, total)
+            finally:
+                for future in futures:
+                    future.cancel()
 
         segments = [segment for _, chunk in sorted(results) for segment in chunk]
         segments.sort(key=lambda segment: (segment.start, segment.end))

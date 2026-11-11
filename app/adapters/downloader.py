@@ -329,7 +329,8 @@ class DouyinShareDownloader:
     PLAY_URL = "https://aweme.snssdk.com/aweme/v1/play/?video_id={uri}&ratio={ratio}&line=0"
     # 「下载源视频」用原画质；转写只取音轨，画质不影响识别，故用 douyin_audio_ratio。
     DEFAULT_VIDEO_RATIO = "1080p"
-    _ROUTER_DATA_RE = re.compile(r"window\._ROUTER_DATA\s*=\s*(\{.*?\})\s*;?\s*</script>", re.S)
+    _ROUTER_DATA_RE = re.compile(r"window\._ROUTER_DATA\s*=\s*", re.S)
+    _SHARE_FETCH_ATTEMPTS = 3
     # CDN 偶发返回几十字节的风控占位内容；小于该阈值一律视为失败并重试。
     _MIN_VIDEO_BYTES = 10_000
     _DOWNLOAD_ATTEMPTS_PER_URL = 2
@@ -396,37 +397,84 @@ class DouyinShareDownloader:
                 "缺少抖音 Cookies（ttwid），无法读取移动分享页。"
                 "请在左侧「平台 Cookies」扫码登录并抓取最新状态后重试。"
             )
-        try:
-            response = httpx.get(
-                self.SHARE_PAGE_URL.format(video_id=video_id),
-                headers={
-                    "User-Agent": self.MOBILE_UA,
-                    "Cookie": cookie_header,
-                    "Referer": "https://www.douyin.com/",
-                },
-                follow_redirects=True,
-                timeout=25,
-                trust_env=False,
+        last_issue = ""
+        for attempt in range(self._SHARE_FETCH_ATTEMPTS):
+            try:
+                response = httpx.get(
+                    self.SHARE_PAGE_URL.format(video_id=video_id),
+                    headers={
+                        "User-Agent": self.MOBILE_UA,
+                        "Cookie": cookie_header,
+                        "Referer": "https://www.douyin.com/",
+                    },
+                    follow_redirects=True,
+                    timeout=25,
+                    trust_env=False,
+                )
+            except httpx.HTTPError as exc:
+                last_issue = f"分享页暂时无法访问（{type(exc).__name__}）"
+            else:
+                if response.status_code == 429:
+                    raise WorkflowError("抖音限制了当前访问频率（HTTP 429），请稍后重试，或减少同时提交的抖音任务。")
+                if response.status_code in (401, 403):
+                    raise WorkflowError(
+                        f"抖音拒绝读取分享页（HTTP {response.status_code}）。"
+                        "请在浏览器中打开原链接，按提示完成登录或验证，再更新平台 Cookies 后重试。"
+                    )
+                if response.status_code == 200:
+                    html = response.text
+                    title = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+                    if title and any(word in title.group(1) for word in ("验证码", "安全验证", "访问验证")):
+                        raise WorkflowError(
+                            "抖音要求安全验证。请在浏览器中打开原链接并手动完成验证，"
+                            "再更新平台 Cookies 后重试，或上传本地视频分析。"
+                        )
+                    item = self._item_from_share_page(html, video_id)
+                    if item is not None:
+                        return item
+                    last_issue = "分享页未完整返回视频数据"
+                elif 500 <= response.status_code < 600 or response.status_code in (408, 425):
+                    last_issue = f"分享页暂时不可用（HTTP {response.status_code}）"
+                else:
+                    raise WorkflowError(f"抖音分享页返回异常状态码：{response.status_code}")
+            LOGGER.warning(
+                "抖音分享页读取失败：video_id=%s，尝试 %s/%s：%s",
+                video_id, attempt + 1, self._SHARE_FETCH_ATTEMPTS, last_issue,
             )
-        except httpx.HTTPError as exc:
-            raise WorkflowError(f"抖音分享页无法访问：{exc}") from exc
-        if response.status_code != 200:
-            raise WorkflowError(f"抖音分享页返回异常状态码：{response.status_code}")
+            if attempt + 1 < self._SHARE_FETCH_ATTEMPTS:
+                sleep(attempt + 1)
+        raise WorkflowError(
+            f"抖音{last_issue}（已尝试 {self._SHARE_FETCH_ATTEMPTS} 次）。"
+            "可能是临时访问限制或页面加载异常，并不一定是作品失效。"
+            "请稍后重试；若浏览器提示登录或验证，请先完成验证并更新平台 Cookies，"
+            "也可上传本地视频分析。"
+        )
 
-        match = self._ROUTER_DATA_RE.search(response.text)
+    def _item_from_share_page(self, html: str, video_id: str) -> dict | None:
+        match = self._ROUTER_DATA_RE.search(html)
         if not match:
-            raise WorkflowError("抖音分享页结构变化（未找到 _ROUTER_DATA），请反馈给开发者。")
+            return None
         try:
-            data = json.loads(match.group(1))
-        except json.JSONDecodeError as exc:
-            raise WorkflowError(f"抖音分享页数据解析失败：{exc}") from exc
-
-        for value in (data.get("loaderData") or {}).values():
+            # Decode only the JSON value; scripts may continue after the assignment.
+            data, _ = json.JSONDecoder().raw_decode(html, match.end())
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("loaderData"), dict):
+            return None
+        for value in data["loaderData"].values():
             if not isinstance(value, dict):
                 continue
-            item_list = (value.get("videoInfoRes") or {}).get("item_list") or []
-            if item_list:
-                return item_list[0]
+            info = value.get("videoInfoRes")
+            if not isinstance(info, dict):
+                continue
+            item_list = info.get("item_list")
+            if not isinstance(item_list, list):
+                continue
+            for item in item_list:
+                if isinstance(item, dict) and (
+                    not item.get("aweme_id") or str(item["aweme_id"]) == video_id
+                ):
+                    return item
         raise WorkflowError(
             "抖音分享页未返回视频数据：作品可能已删除、设为私密或被临时风控。"
             "请稍后重试，或改用上传本地视频分析。"
