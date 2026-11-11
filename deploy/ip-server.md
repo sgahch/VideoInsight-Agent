@@ -226,3 +226,42 @@ The original Nginx config was restored byte-for-byte and submissions reopened.
 Application and Groq sidecar reported healthy with no OOM events.
 The Groq sidecar and pre-existing unrelated containers retained their IDs
 and start times. All application environment settings were verified unchanged.
+
+## Cookie Authorization Environment Detection
+
+On 2026-11-11, the missing Chrome/Edge error was traced to the existing
+authorization flow launching a native browser on the backend host. This
+Docker service has no desktop display, so installing a browser alone would
+not provide a login window on the visitor's computer.
+
+- Application image: `videoinsight:e17fd24`.
+- `COOKIE_LOGIN_MODE=auto` now detects this headless environment and uses
+  import-only authorization. File/JSON upload and pasted export content are
+  directly visible; native browser and QR controls are hidden.
+- Local desktop deployments retain their existing native-browser login flow.
+  Inline web QR login and remote desktop access were not added.
+- Windows and the isolated Linux runtime each passed all 450 Python tests.
+  Desktop and mobile screenshots were checked. File and text imports were
+  exercised on an isolated local test service with dummy data only.
+- Production checks verified authorization capabilities, rejection of
+  unsupported native-browser actions, login protection, a mock task, detail
+  view, the used marker, and actual Groq model listing (HTTP 200). Only the
+  isolated verification task was deleted; historical task counts matched.
+- No real platform login data was imported. Existing cookie storage and all
+  application environment settings were verified unchanged. The Bilibili
+  download fix and private Groq route remain in place.
+
+Submissions and cookie writes were temporarily gated, all clients' tasks
+drained, and SQLite, the private environment, container configuration, and
+Nginx vhost backed up before switching. The root-only backup is
+`/opt/videoinsight/backups/20261111-cookie-auth-e17fd24-verified`.
+The previous application is stopped as
+`videoinsight-before-cookie-auth-e17fd24-verified`, with restart disabled.
+The original Nginx configuration was restored byte-for-byte and submissions
+reopened. Application and Groq sidecar reported healthy with no OOM events.
+The sidecar and unrelated containers retained their IDs and start times.
+
+Runtime package versions are recorded at
+`/opt/videoinsight/releases/e17fd24/runtime-packages.txt`.
+The public IP endpoint remains HTTP. Use HTTPS or an encrypted SSH tunnel
+before importing real Cookies; this release does not add TLS.
