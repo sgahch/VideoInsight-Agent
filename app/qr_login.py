@@ -4,13 +4,18 @@ from app.browser_cookies import BrowserCookieError, capture_douyin_cookies, cook
 from app.config import Settings, settings
 from app.adapters.downloader import cookie_storage_path
 from app.cookies import summarize_cookie_file
+from app.remote_qr import RemoteQRLoginError, remote_qr_manager
 
 
 class QRLoginError(Exception):
     pass
 
 
-def start_qr_login(runtime_settings: Settings = settings) -> dict[str, object]:
+def start_qr_login(runtime_settings: Settings = settings, owner: str | None = "legacy") -> dict[str, object]:
+    if runtime_settings.cookie_login_mode.strip().lower() in {"auto", "remote"} and runtime_settings.cookie_qr_browser_url:
+        if not owner:
+            raise RemoteQRLoginError("请刷新页面后重新扫码登录。")
+        return remote_qr_manager.start(runtime_settings, owner)
     try:
         # Reuse the persistent dedicated profile. Clearing it here forced a full
         # QR/SMS login every time the user clicked the login button.
@@ -26,7 +31,9 @@ def start_qr_login(runtime_settings: Settings = settings) -> dict[str, object]:
     }
 
 
-def check_qr_login(session_id: str, runtime_settings: Settings = settings) -> dict[str, object]:
+def check_qr_login(session_id: str, runtime_settings: Settings = settings, owner: str | None = "legacy") -> dict[str, object]:
+    if session_id != "browser":
+        return remote_qr_manager.status(session_id, owner)
     if session_id != "browser":
         raise QRLoginError("没有找到二维码会话，请重新打开扫码登录窗口。")
 

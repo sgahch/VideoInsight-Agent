@@ -5,7 +5,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>VideoInsight Agent - 沉浸式 AI 视频分析平台</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261111-cookie-mode1" />
+  <link rel="stylesheet" href="/static/styles.css?v=20261111-inline-qr1" />
   <link rel="stylesheet" href="/static/queue.css?v=20261106-used1" />
 </head>
 
@@ -396,6 +396,17 @@
 
           <button id="startQrLogin" class="btn full-width" type="button" hidden>登录/刷新抖音 Cookies</button>
 
+          <div id="qrView" class="qr-login-view" hidden>
+            <div id="qrStage" class="qr-code-stage">
+              <img id="qrImage" class="qr-image" alt="抖音登录二维码" hidden />
+              <span id="qrPlaceholder">正在生成二维码...</span>
+            </div>
+            <div class="qr-login-status">
+              <p id="qrMessage" class="cookie-message" role="status" aria-live="polite"></p>
+              <button id="cancelQrLogin" class="mini-btn" type="button" hidden>取消登录</button>
+            </div>
+          </div>
+
           <details id="cookieImport" class="cookie-advanced" open>
             <summary id="cookieImportSummary">导入平台 Cookies</summary>
 
@@ -421,8 +432,6 @@
             </div>
           </details>
 
-          <img id="qrImage" class="qr-image" alt="抖音登录二维码" hidden />
-          <p id="qrMessage" class="cookie-message" hidden></p>
           <p id="cookieMessage" class="cookie-message">链接解析失败时再配置。</p>
         </div>
       </section>
@@ -535,7 +544,7 @@
 
   <script src="/static/comment-utils.js?v=20261105"></script>
   <script src="/static/queue.js?v=20261106-used1"></script>
-  <script src="/static/app.js?v=20261111-cookie-mode1"></script>
+  <script src="/static/app.js?v=20261111-inline-qr1"></script>
 </body>
 
 </html>

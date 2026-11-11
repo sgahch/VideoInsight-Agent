@@ -396,7 +396,8 @@ Key 仅保存在 Git 忽略的 `.env`，不会通过健康检查或任务诊断�
 | `DASHSCOPE_ASR_GLOBAL_WORKERS` | `8` | 所有视频合计的转写调用并发上限 |
 | `YTDLP_COOKIES_FROM_BROWSER` | — | 复用本机浏览器 Cookies，如 `chrome` / `edge` |
 | `YTDLP_COOKIES_FILE` | — | Netscape 格式 `cookies.txt` 路径 |
-| `COOKIE_LOGIN_MODE` | `auto` | 自动检测桌面授权；`import` 仅导入，`desktop` 显式使用已有桌面环境 |
+| `COOKIE_LOGIN_MODE` | `auto` | 优先使用已配置的网页扫码；`remote` 网页扫码，`import` 仅导入，`desktop` 本地桌面 |
+| `COOKIE_QR_BROWSER_URL` | — | 私有登录浏览器 CDP 地址，设置后 `auto` 启用网页内扫码 |
 | `MEDIA_CRAWLER_OUTPUT_DIR` | — | MediaCrawler 评论落盘目录 |
 | `MEDIA_CRAWLER_API_URL` | — | MediaCrawler API 地址 |
 
@@ -408,12 +409,30 @@ Key 仅保存在 Git 忽略的 `.env`，不会通过健康检查或任务诊断�
 
 多数公开视频可直接解析；遇到登录态或风控提示时，再配置 Cookies。
 
-**服务器 / Docker：文件或文本导入**
+**服务器 / Docker：网页扫码登录**
 
-云端容器不能在访问者的电脑上弹出浏览器窗口，也未提供网页内扫码或远程桌面。
-`COOKIE_LOGIN_MODE=auto` 在无桌面环境自动隐藏扫码、打开窗口和抓取按钮，
-直接展开导入区。远程部署也可以显式配置 `COOKIE_LOGIN_MODE=import`。
-仅在服务器安装 Chrome 并不能让访问者看到窗口。
+在与应用相同的私有 Docker 网络启动隔离登录浏览器：
+
+```bash
+docker compose -f deploy/qr-browser/compose.yaml up -d
+```
+
+为应用配置 `COOKIE_QR_BROWSER_URL=http://videoinsight-qr-browser:9222`，
+保留 `COOKIE_LOGIN_MODE=auto` 或设为 `remote`，然后重建应用容器。
+网页「Cookies 授权」点击登录按钮即可看到抖音二维码，用抖音 App 扫码并确认。
+登录成功后自动保存 Cookies，并重试当前待授权链接。可以刷新或取消二维码，
+会话最多保留 3 分钟；完成、失败、取消或超时后都会销毁隔离浏览器上下文。
+服务只允许一个活跃扫码会话，状态和取消操作按客户端隔离。
+保存时原子替换抖音登录态，保留其他平台 Cookies；登录凭据不返回网页。
+
+浏览器没有持久化账号配置，也不开放远程桌面。**不要发布 9222 端口到公网**，
+不要将 CDP 地址放进前端代码。镜像固定摘要，容器设有内存、CPU 和进程数上限。
+扫码只能授权你确认的账号，不能保证绕过平台的访问限制或验证码。
+
+**文件或文本导入**
+
+未配置扫码浏览器且没有桌面环境时，自动展示手动导入。
+`COOKIE_LOGIN_MODE=import` 可显式禁用扫码。
 
 在自己的浏览器导出 Netscape `cookies.txt` 或含域名的 Cookie Editor JSON，
 然后上传保存；抖音 Cookie 请求头文本也可粘贴保存。保存后无需重启。

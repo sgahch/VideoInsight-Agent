@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+from http.cookiejar import Cookie, MozillaCookieJar
 from pathlib import Path
 from time import time
 
@@ -101,9 +104,9 @@ def cookie_objects_to_netscape(
 
 def summarize_cookie_text(text: str) -> dict[str, object]:
     rows = [
-        line.split("\t")
+        line.removeprefix("#HttpOnly_").split("\t")
         for line in text.splitlines()
-        if line.strip() and not line.startswith("#") and "\t" in line
+        if line.strip() and (not line.startswith("#") or line.startswith("#HttpOnly_")) and "\t" in line
     ]
     names = {row[5] for row in rows if len(row) >= 7}
     present = sorted(name for name in IMPORTANT_DOUYIN_COOKIES if name in names)
@@ -158,3 +161,42 @@ def write_normalized_cookie_file(target: Path, raw: bytes, domain: str = DEFAULT
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(normalize_cookie_upload(raw, domain), encoding="utf-8")
     return target
+
+
+def save_douyin_login_cookies(target: Path, cookies: list[dict]) -> None:
+    jar = MozillaCookieJar()
+    if target.is_file() and target.stat().st_size:
+        jar.load(str(target), ignore_discard=True, ignore_expires=True)
+    for cookie in list(jar):
+        if is_douyin_domain(cookie.domain):
+            jar.clear(cookie.domain, cookie.path, cookie.name)
+    for item in cookies:
+        domain = str(item.get("domain") or "")
+        if not is_douyin_domain(domain):
+            continue
+        expires = float(item.get("expires", -1))
+        jar.set_cookie(Cookie(
+            version=0, name=item["name"], value=item["value"], port=None,
+            port_specified=False, domain=domain, domain_specified=domain.startswith("."),
+            domain_initial_dot=domain.startswith("."), path=item.get("path") or "/",
+            path_specified=True, secure=bool(item.get("secure")),
+            expires=int(expires) if expires > 0 else None, discard=expires <= 0,
+            comment=None, comment_url=None,
+            rest={"HTTPOnly": ""} if item.get("httpOnly") else {}, rfc2109=False,
+        ))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=".qr-cookies-", dir=target.parent)
+    os.close(descriptor)
+    try:
+        jar.save(name, ignore_discard=True, ignore_expires=True)
+        with open(name, "r+b") as handle:
+            os.fsync(handle.fileno())
+        os.replace(name, target)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def is_douyin_domain(domain: str) -> bool:
+    domain = domain.lstrip(".").lower()
+    return domain == "douyin.com" or domain.endswith(".douyin.com")

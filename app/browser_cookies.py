@@ -40,6 +40,11 @@ class BrowserCookieError(Exception):
 
 def cookie_browser_capabilities(runtime_settings: Settings = settings) -> dict[str, object]:
     mode = runtime_settings.cookie_login_mode.strip().lower()
+    if mode in {"auto", "remote"} and runtime_settings.cookie_qr_browser_url:
+        return {
+            "mode": "remote", "desktop_available": False, "qr_available": True, "reason": None,
+            "message": "请在本页扫码登录，无需打开服务器桌面窗口。",
+        }
     if mode not in {"auto", "desktop", "import"} or mode == "import":
         reason = "configured_import"
     elif mode == "auto" and not _has_desktop_display():

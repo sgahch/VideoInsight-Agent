@@ -1431,11 +1431,49 @@ input[type="file"].cookie-textarea {
   cursor: not-allowed;
 }
 
-.qr-image {
-  max-width: 180px;
-  border-radius: var(--radius-sm);
+.qr-login-view {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 16px 0;
+}
+.qr-code-stage {
+  display: grid;
+  place-items: center;
+  flex: 0 0 224px;
+  width: 224px;
+  height: 224px;
+  padding: 12px;
+  box-sizing: border-box;
   border: 1px solid var(--border);
-  align-self: center;
+  border-radius: 6px;
+  background: #fff;
+  color: #525866;
+  font-size: 13px;
+}
+.qr-image {
+  width: 198px;
+  height: 198px;
+  object-fit: contain;
+}
+.qr-login-status {
+  min-width: 0;
+}
+.qr-login-status .cookie-message {
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0 0 12px;
+}
+@media (max-width: 560px) {
+  .qr-login-view {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 12px;
+  }
+  .qr-code-stage {
+    flex-basis: auto;
+  }
 }
 .cookie-message {
   font-size: 11px;

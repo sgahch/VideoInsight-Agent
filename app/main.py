@@ -22,6 +22,7 @@ from app.browser_cookies import BrowserCookieError, capture_douyin_cookies, cook
 from app.cookies import summarize_cookie_file, write_normalized_cookie_file
 from app.errors import VideoInsightError
 from app.qr_login import QRLoginError, check_qr_login, start_qr_login
+from app.remote_qr import RemoteQRLoginError, remote_qr_manager
 from app.link_parser import parse_share_text
 from app.schemas import (
     AnalysisMode,
@@ -172,6 +173,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
+        await asyncio.to_thread(remote_qr_manager.shutdown)
         # 不等待：正在跑的下载/转写没法安全打断，留给进程退出处理。
         task_queue.shutdown(wait=False)
 
@@ -426,19 +428,40 @@ def get_cookies_status() -> dict[str, object]:
 
 
 @app.post("/cookies/qr/start")
-def start_qr_cookie_login() -> dict[str, object]:
+def start_qr_cookie_login(
+    response: Response, x_client_id: str | None = Header(default=None),
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
     try:
-        return start_qr_login(settings)
+        return start_qr_login(settings, _client_id_from_header(x_client_id))
+    except RemoteQRLoginError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except QRLoginError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/cookies/qr/{session_id}/status")
-def get_qr_cookie_login_status(session_id: str) -> dict[str, object]:
+def get_qr_cookie_login_status(
+    session_id: str, response: Response, x_client_id: str | None = Header(default=None),
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
     try:
-        return check_qr_login(session_id, settings)
+        return check_qr_login(session_id, settings, _client_id_from_header(x_client_id))
+    except RemoteQRLoginError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except QRLoginError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/cookies/qr/{session_id}")
+def cancel_qr_cookie_login(
+    session_id: str, response: Response, x_client_id: str | None = Header(default=None),
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return remote_qr_manager.cancel(session_id, _client_id_from_header(x_client_id))
+    except RemoteQRLoginError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @app.post("/cookies/browser/start")

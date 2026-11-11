@@ -1,0 +1,46 @@
+services:
+  qr-browser:
+    image: chromedp/headless-shell@sha256:830fa77e0602cb42e5cb2cbd9237ba27b649ad69d5fb82b54713aac8b7ab4f29
+    container_name: videoinsight-qr-browser
+    restart: unless-stopped
+    init: true
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m,mode=1777
+    environment:
+      HOME: /tmp
+      XDG_CACHE_HOME: /tmp/cache
+    command:
+      - --disable-gpu
+      - --disable-dev-shm-usage
+      - --user-data-dir=/tmp/profile
+      - --no-first-run
+      - about:blank
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: 0.75
+    pids_limit: 128
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "printf 'GET /json/version HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' | socat -T 3 - TCP4:127.0.0.1:9222,connect-timeout=3 | grep -q webSocketDebuggerUrl"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    networks:
+      - videoinsight-network
+
+networks:
+  videoinsight-network:
+    external: true
