@@ -60,6 +60,16 @@ def test_friendly_download_error_for_browser_cookie_failure() -> None:
     assert "Could not copy" not in message
 
 
+def test_friendly_download_error_for_bilibili_cdn_567() -> None:
+    message = friendly_download_error(
+        "HTTP Error 567: Unknown Status\nRequested format is not available",
+    )
+    assert "B 站下载节点" in message
+    assert "HTTP 567" in message
+    assert "上传文件分析" in message
+    assert "Unknown Status" not in message
+
+
 def test_friendly_download_error_for_stale_configured_cookies() -> None:
     message = friendly_download_error(
         "ERROR: Fresh cookies are needed",

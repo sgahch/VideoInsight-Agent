@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 
 import httpx
 import pytest
@@ -145,6 +149,148 @@ def test_legacy_segments_are_all_retained(api):
     assert fmt["protocol"] == "http_dash_segments"
     assert len(fmt["fragments"]) == 2
     assert sum(f["duration"] for f in fmt["fragments"]) == 197
+
+
+@pytest.mark.parametrize("backup_key", ["backupUrl", "backup_url"])
+def test_dash_cdn_backups_keep_quality_and_prefer_primary(api, backup_key):
+    audio = api["play_info"]["dash"]["audio"][0]
+    audio[backup_key] = [
+        audio["baseUrl"], "https://backup.example/audio.m4s",
+        "https://backup.example/audio.m4s", None, "file:///private",
+    ]
+    formats = resolve_bilibili_info(URL, [])["formats"]
+    audios = [f for f in formats if f["vcodec"] == "none"]
+    assert [f["url"] for f in audios] == [audio["baseUrl"], "https://backup.example/audio.m4s"]
+    assert [f["source_preference"] for f in audios] == [0, -1]
+    assert all(f["tbr"] == 192 for f in audios)
+    assert len({f["format_id"] for f in formats}) == len(formats)
+
+
+def test_legacy_backup_keeps_every_segment(api):
+    api["play_info"] = {"durl": [
+        {"url": "https://cdn.example/1.flv", "length": 100000,
+         "backup_url": ["https://backup.example/1.flv"]},
+        {"url": "https://cdn.example/2.flv", "length": 97000},
+    ]}
+    formats = resolve_bilibili_info(URL, [])["formats"]
+    assert len(formats) == 2
+    assert [f["url"] for f in formats[1]["fragments"]] == [
+        "https://backup.example/1.flv", "https://cdn.example/2.flv",
+    ]
+    assert all(sum(p["duration"] for p in f["fragments"]) == 197 for f in formats)
+
+
+def test_missing_legacy_segment_is_not_silently_dropped(api):
+    api["play_info"] = {"durl": [
+        {"url": "https://cdn.example/1.flv", "length": 100000},
+        {"length": 97000},
+    ]}
+    with pytest.raises(WorkflowError, match="未返回可用"):
+        resolve_bilibili_info(URL, [])
+
+
+def test_retry_refreshes_signed_bilibili_urls(api, monkeypatch, tmp_path):
+    instance = YtDlpDownloader(tmp_path)
+    monkeypatch.setattr(instance, "_yt_dlp_command", lambda: ["yt-dlp"])
+    monkeypatch.setattr(downloader_module, "resolve_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(downloader_module, "resolve_cookies_file", lambda _: None)
+
+    def run(build):
+        command = build()
+        source = Path(command[command.index("--load-info-json") + 1])
+        assert json.loads(source.read_text(encoding="utf-8"))["formats"][0]["url"].endswith("audio.m4s")
+        api["play_info"]["dash"]["audio"][0]["baseUrl"] = "https://cdn.example/refreshed.m4s"
+        command = build()
+        info = json.loads(source.read_text(encoding="utf-8"))
+        assert info["formats"][0]["url"].endswith("refreshed.m4s")
+        (source.parent / "test.mp3").write_bytes(b"audio")
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(info), stderr="")
+
+    monkeypatch.setattr(downloader_module, "_run_yt_dlp_with_cookie_recovery", run)
+    instance.download_audio(URL, "task")
+    assert len(api["requests"]) == 4
+
+
+@pytest.fixture
+def cdn():
+    state = {"requests": [], "block_primary": False, "block_all": False,
+             "data": bytes(range(256)) * 8192}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requested_range = self.headers.get("Range", "")
+            state["requests"].append((self.path, requested_range))
+            if state["block_all"] or not requested_range or (state["block_primary"] and self.path == "/primary"):
+                self.send_response(567)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            match = re.fullmatch(r"bytes=(\d+)-(\d*)", requested_range)
+            assert match is not None
+            start = int(match[1])
+            end = min(int(match[2]) if match[2] else len(state["data"]) - 1, len(state["data"]) - 1)
+            body = state["data"][start:end + 1]
+            self.send_response(206)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(state['data'])}")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state["base"] = f"http://127.0.0.1:{server.server_port}"
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("block_primary", [False, True])
+def test_real_yt_dlp_ranges_and_cdn_failover(api, cdn, tmp_path, block_primary):
+    cdn["block_primary"] = block_primary
+    audio = api["play_info"]["dash"]["audio"][0]
+    audio["baseUrl"] = cdn["base"] + "/primary"
+    audio["backupUrl"] = [cdn["base"] + "/backup"]
+    output = tmp_path / "download.m4a"
+    args = YtDlpDownloader._input_args(URL, tmp_path, None)
+    assert args[args.index("--retries") + 1] == "2"
+    assert "--abort-on-unavailable-fragments" in args
+    result = subprocess.run(
+        [sys.executable, "-m", "yt_dlp", "--ignore-config", "--proxy", "",
+         *args, "--retries", "0", "-f", "bestaudio/best", "--no-progress", "-o", str(output)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() == cdn["data"], "Range probe must not truncate the complete download"
+    assert all(requested_range for _, requested_range in cdn["requests"])
+    assert any(path == "/primary" for path, _ in cdn["requests"])
+    assert any(path == "/backup" for path, _ in cdn["requests"]) is block_primary
+    assert len(cdn["requests"]) < 10
+
+
+def test_all_cdn_candidates_failing_does_not_report_success(api, cdn, tmp_path):
+    cdn["block_all"] = True
+    audio = api["play_info"]["dash"]["audio"][0]
+    audio["baseUrl"] = cdn["base"] + "/primary"
+    audio["backup_url"] = [cdn["base"] + "/backup"]
+    api["play_info"]["dash"]["video"] = []
+    output = tmp_path / "download.m4a"
+    result = subprocess.run(
+        [sys.executable, "-m", "yt_dlp", "--ignore-config", "--proxy", "",
+         *YtDlpDownloader._input_args(URL, tmp_path, None), "--retries", "0",
+         "-f", "bestaudio/best", "--no-progress", "-o", str(output)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert not output.exists()
+    assert {path for path, _ in cdn["requests"]} == {"/primary", "/backup"}
+    assert len(cdn["requests"]) == 2
 
 
 def test_cookies_are_scoped_to_bilibili(api, tmp_path):

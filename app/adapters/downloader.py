@@ -88,10 +88,12 @@ class YtDlpDownloader:
             output_template,
         ]
         cookies_file = resolve_cookies_file(settings)
-        input_args = self._input_args(url, task_dir, cookies_file)
         # 传入可调用对象：每次尝试前重新暂存 cookies，这样浏览器刷新 cookies 后重试才生效。
         completed = _run_yt_dlp_with_cookie_recovery(
-            lambda: [*cmd_base, *_cookie_args(cookies_file, task_dir), *input_args]
+            lambda: [
+                *cmd_base, *_cookie_args(cookies_file, task_dir),
+                *self._input_args(url, task_dir, cookies_file),
+            ]
         )
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
@@ -143,9 +145,11 @@ class YtDlpDownloader:
             output_template,
         ]
         cookies_file = resolve_cookies_file(settings)
-        input_args = self._input_args(url, task_dir, cookies_file)
         completed = _run_yt_dlp_with_cookie_recovery(
-            lambda: [*cmd_base, *_cookie_args(cookies_file, task_dir), *input_args]
+            lambda: [
+                *cmd_base, *_cookie_args(cookies_file, task_dir),
+                *self._input_args(url, task_dir, cookies_file),
+            ]
         )
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
@@ -167,7 +171,14 @@ class YtDlpDownloader:
         info = resolve_bilibili_info(url, _cookie_args(cookies_file, task_dir))
         info_file = task_dir / ".bilibili-source.json"
         info_file.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
-        return ["--load-info-json", str(info_file)]
+        # B 站 CDN 可能拒绝整文件 GET（567），但接受 Range；先测候选节点，
+        # 再以分块请求完整下载。重试时重新解析，避免复用已过期的签名地址。
+        return [
+            "--http-chunk-size", "1M", "--check-formats",
+            "--retries", "2", "--fragment-retries", "2",
+            "--socket-timeout", "15", "--abort-on-unavailable-fragments",
+            "--load-info-json", str(info_file),
+        ]
 
     @staticmethod
     def _yt_dlp_command() -> list[str] | None:
@@ -795,6 +806,11 @@ def friendly_download_error(detail: str, *, cookies_configured: bool = False) ->
         return (
             "yt-dlp 无法识别该链接。抖音图文/笔记（/note/）或改版分享页通常无法直接下载，"
             "请在 App 内下载后改用“上传文件分析”，或换用该作品的视频链接。"
+        )
+    if "http error 567" in lower:
+        return (
+            "B 站下载节点拒绝了请求（HTTP 567）。请稍后重试，"
+            "或上传有效的 B 站 Cookies；仍失败可改用「上传文件分析」。"
         )
     if "no video formats found" in lower or "requested format is not available" in lower:
         return "该链接没有可用的视频流（可能是图文帖、直播回放或已下架），请改用上传文件分析。"

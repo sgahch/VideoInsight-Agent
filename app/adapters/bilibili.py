@@ -87,36 +87,50 @@ def _video_detail(client: httpx.Client, query: dict) -> dict:
     return {"bvid": query.get("bvid"), "pages": pages}
 
 
+def _media_urls(stream: dict, primary_keys: tuple[str, ...]) -> list[str]:
+    primary = next((stream.get(key) for key in primary_keys if stream.get(key)), None)
+    backups = stream.get("backupUrl") or stream.get("backup_url") or []
+    if not isinstance(backups, list):
+        backups = []
+    return list(dict.fromkeys(
+        url for url in [primary, *backups]
+        if isinstance(url, str) and urlparse(url).scheme in {"http", "https"}
+    ))
+
+
 def _formats(play_info: dict) -> list[dict]:
     formats = []
     dash = play_info.get("dash") or {}
     for kind in ("audio", "video"):
         for stream in dash.get(kind) or []:
-            url = stream.get("baseUrl") or stream.get("base_url")
-            if not url:
-                continue
-            formats.append({
-                "format_id": f"{kind}-{stream.get('id')}-{stream.get('codecid', 0)}",
-                "url": url,
-                "ext": "m4a" if kind == "audio" else "mp4",
-                "acodec": stream.get("codecs") if kind == "audio" else "none",
-                "vcodec": "none" if kind == "audio" else stream.get("codecs"),
-                "tbr": (stream.get("bandwidth") or 0) / 1000,
-                "width": stream.get("width"),
-                "height": stream.get("height"),
-            })
+            for index, url in enumerate(_media_urls(stream, ("baseUrl", "base_url"))):
+                formats.append({
+                    "format_id": f"{kind}-{stream.get('id')}-{stream.get('codecid', 0)}-cdn{index}",
+                    "source_preference": -index,
+                    "url": url,
+                    "ext": "m4a" if kind == "audio" else "mp4",
+                    "acodec": stream.get("codecs") if kind == "audio" else "none",
+                    "vcodec": "none" if kind == "audio" else stream.get("codecs"),
+                    "tbr": (stream.get("bandwidth") or 0) / 1000,
+                    "width": stream.get("width"),
+                    "height": stream.get("height"),
+                })
     # 老视频可能仅返回分段的音视频合流，必须保留全部分段，避免静默截短。
-    fragments = [
-        {"url": part["url"], "duration": (part.get("length") or 0) / 1000}
-        for part in play_info.get("durl") or [] if part.get("url")
-    ]
-    if fragments:
-        formats.append({
-            "format_id": "http",
-            "url": fragments[0]["url"],
-            "ext": "mp4",
-            **({"fragments": fragments, "protocol": "http_dash_segments"} if len(fragments) > 1 else {}),
-        })
+    parts = [(part, _media_urls(part, ("url",))) for part in play_info.get("durl") or []]
+    if parts and all(urls for _, urls in parts):
+        for index in range(max(len(urls) for _, urls in parts)):
+            fragments = [
+                {"url": urls[index] if index < len(urls) else urls[0],
+                 "duration": (part.get("length") or 0) / 1000}
+                for part, urls in parts
+            ]
+            formats.append({
+                "format_id": f"http-cdn{index}",
+                "source_preference": -index,
+                "url": fragments[0]["url"],
+                "ext": "mp4",
+                **({"fragments": fragments, "protocol": "http_dash_segments"} if len(fragments) > 1 else {}),
+            })
     return formats
 
 
