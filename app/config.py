@@ -27,6 +27,7 @@ class Settings:
     db_path: Path = Path(os.getenv("VIDEOINSIGHT_DB_PATH", "data/videoinsight.db"))
     asr_provider: str = os.getenv("ASR_PROVIDER", "paraformer")
     groq_api_key: str | None = field(default=os.getenv("GROQ_API_KEY") or None, repr=False)
+    groq_proxy_url: str | None = field(default=os.getenv("GROQ_PROXY_URL") or None, repr=False)
     groq_asr_model: str = os.getenv("GROQ_ASR_MODEL", "whisper-large-v3-turbo")
     groq_asr_chunk_seconds: int = int(os.getenv("GROQ_ASR_CHUNK_SECONDS", "300"))
     groq_asr_max_workers: int = int(os.getenv("GROQ_ASR_MAX_WORKERS", "2"))

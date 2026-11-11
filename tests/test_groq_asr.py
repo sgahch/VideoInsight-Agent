@@ -22,6 +22,7 @@ def _settings(**kwargs) -> Settings:
     return Settings(**{
         "asr_provider": "groq",
         "groq_api_key": "private-test-groq-key",
+        "groq_proxy_url": None,
         "groq_asr_chunk_seconds": 1,
         "groq_asr_global_workers": 2,
         "groq_asr_max_workers": 2,
@@ -130,6 +131,80 @@ def test_short_audio_is_one_request_and_does_not_require_dashscope(monkeypatch, 
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "proxy",
+    [None, "http://user:private-proxy-password@127.0.0.1:7890", "https://proxy.example:8443"],
+)
+def test_proxy_is_explicit_and_overrides_system_proxy_only_when_set(monkeypatch, tmp_path, proxy):
+    options = []
+    original_client = httpx.Client
+
+    def client(**kwargs):
+        options.append(kwargs)
+        return original_client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=_payload())),
+        )
+
+    monkeypatch.setattr(groq.httpx, "Client", client)
+    runtime = _settings(groq_proxy_url=proxy)
+    source = _wav(tmp_path / "source.wav")
+    assert groq.GroqTranscriber(runtime, _Preprocessor()).transcribe(source, "task")
+    assert options[0]["proxy"] == proxy
+    assert options[0]["trust_env"] is (proxy is None)
+    assert "private-proxy-password" not in repr(runtime)
+
+
+@pytest.mark.parametrize(
+    "proxy",
+    [
+        "",
+        "localhost:7890",
+        "socks5://user:private-proxy-password@127.0.0.1:7890",
+        "http://user:private-proxy-password@127.0.0.1:bad-port",
+        "http://127.0.0.1:7890/private-path",
+        "http://127.0.0.1:7890?secret=private-proxy-password",
+    ],
+)
+def test_invalid_proxy_is_rejected_before_processing_without_exposing_credentials(tmp_path, proxy):
+    transcriber = groq.GroqTranscriber(_settings(groq_proxy_url=proxy))
+    with pytest.raises(ExternalDependencyError, match="GROQ_PROXY_URL") as error:
+        transcriber.transcribe(tmp_path / "missing.wav", "task")
+    assert "private-proxy-password" not in str(error.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_proxy_initialization_error_does_not_echo_credentials(monkeypatch, tmp_path):
+    proxy = "http://user:private-proxy-password@127.0.0.1:7890"
+
+    def fail(**kwargs):
+        raise ValueError(proxy)
+
+    monkeypatch.setattr(groq.httpx, "Client", fail)
+    source = _wav(tmp_path / "source.wav")
+    transcriber = groq.GroqTranscriber(_settings(groq_proxy_url=proxy), _Preprocessor())
+    with pytest.raises(ExternalDependencyError, match="初始化失败") as error:
+        transcriber.transcribe(source, "task")
+    assert "private-proxy-password" not in str(error.value)
+    assert list(tmp_path.glob("task-*.wav")) == []
+
+
+def test_proxy_connection_failure_is_not_retried_or_fallen_back_to_direct(monkeypatch, tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        raise httpx.ProxyError("private-proxy-password", request=request)
+
+    _mock_client(monkeypatch, handler)
+    source = _wav(tmp_path / "source.wav")
+    transcriber = groq.GroqTranscriber(_settings(), _Preprocessor())
+    with pytest.raises(WorkflowError, match="网络连接失败") as error:
+        transcriber.transcribe(source, "task")
+    assert len(calls) == 1
+    assert "private-proxy-password" not in str(error.value)
+    assert list(tmp_path.glob("task-*.wav")) == []
+
+
 @pytest.mark.parametrize("status", [400, 401, 403, 413])
 def test_permanent_errors_are_not_retried_or_sent_to_paraformer(monkeypatch, tmp_path, status):
     calls = []
@@ -233,6 +308,19 @@ def test_error_redaction_happens_before_message_truncation():
     assert "private" not in error
 
 
+def test_proxy_credentials_are_redacted_from_response_errors():
+    proxy = "http://user:private%2Dproxy%2Dpassword@127.0.0.1:7890"
+    transcriber = groq.GroqTranscriber(_settings(groq_proxy_url=proxy))
+    response = httpx.Response(
+        407,
+        json={"error": {"message": "x" * 490 + proxy + " private-proxy-password"}},
+        headers={"x-request-id": "private-proxy-password"},
+    )
+    error = str(transcriber._response_error(response))
+    assert "private" not in error
+    assert "[REDACTED]" in error
+
+
 @pytest.mark.parametrize(
     "data",
     [
@@ -322,11 +410,15 @@ def test_credentials_and_invalid_models_are_checked_before_conversion(tmp_path):
 def test_health_reports_provider_without_credentials(monkeypatch):
     import app.main as main
 
-    monkeypatch.setattr(main, "settings", _settings())
+    monkeypatch.setattr(
+        main, "settings",
+        _settings(groq_proxy_url="http://user:private-proxy-password@127.0.0.1:7890"),
+    )
     health = main.health()
     assert health["asr_provider"] == "groq"
     assert health["asr_model"] == "whisper-large-v3-turbo"
     assert "private-test-groq-key" not in json.dumps(health)
+    assert "private-proxy-password" not in json.dumps(health)
     assert _settings().asr_global_workers == 2
 
 

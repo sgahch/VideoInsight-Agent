@@ -100,6 +100,28 @@ request was also rejected without credentials and with another user agent.
 The website can run, but server-side transcription is not ready until this
 access issue is resolved. No paid-provider fallback was enabled.
 
+### Groq Route Verification
+
+A follow-up on 2026-11-11 isolated the network route from the credentials:
+both the original and replacement keys could list models through the Windows
+machine's existing proxy, while direct requests returned 403. This does not
+establish which Groq IP or regional policy caused the rejection.
+
+A temporary SSH reverse forward bound only to the server's loopback address,
+restricted to `CONNECT api.groq.com:443`, also succeeded from an isolated
+host-network test container. Model listing and actual transcription returned
+200. A generated 6.73-second Chinese speech sample was transcribed correctly.
+The tunnel and test container were closed afterward; production configuration
+and the existing services were not changed.
+
+The application now supports a private `GROQ_PROXY_URL` for HTTP/HTTPS
+proxies. An explicit proxy overrides environment proxies for Groq only;
+connection failure does not trigger direct or paid-provider fallback.
+Proxy credentials are excluded from settings repr and redacted from errors.
+Production still needs a persistent, approved server-side proxy endpoint.
+Do not rely on an operator's laptop staying online or expose an open proxy.
+This configuration addition has not yet been deployed to the production image.
+
 DeepSeek model listing returned HTTP 200. The server configuration uses
 `deepseek-flash`, which was present in that response, instead of the local
 legacy `deepseek-chat` value. No paid summary request was needed for this check.

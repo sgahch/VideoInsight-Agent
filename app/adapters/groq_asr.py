@@ -40,6 +40,7 @@ class GroqTranscriber:
             raise ExternalDependencyError("未配置 GROQ_API_KEY，无法调用 Groq 语音转写。")
         if self.settings.groq_asr_model not in ("whisper-large-v3-turbo", "whisper-large-v3"):
             raise ExternalDependencyError("GROQ_ASR_MODEL 必须为 whisper-large-v3-turbo 或 whisper-large-v3。")
+        self._validate_proxy()
         self._stopped.clear()
         self._error = None
         self.last_duration = None
@@ -59,11 +60,7 @@ class GroqTranscriber:
             )
             if reporter is not None:
                 reporter.mark_transcribe_started(duration, len(chunk_paths))
-            with httpx.Client(
-                headers={"Authorization": f"Bearer {self.settings.groq_api_key}"},
-                timeout=httpx.Timeout(120, connect=15),
-                follow_redirects=False,
-            ) as client:
+            with self._client() as client:
                 workers = min(max(1, self.settings.groq_asr_max_workers), len(chunk_paths))
                 executor = ThreadPoolExecutor(max_workers=workers)
                 futures = {}
@@ -96,6 +93,36 @@ class GroqTranscriber:
                 if path != wav_path:
                     _best_effort_unlink(path)
             _best_effort_unlink(wav_path)
+
+    def _validate_proxy(self) -> None:
+        if self.settings.groq_proxy_url is None:
+            return
+        try:
+            proxy = httpx.URL(self.settings.groq_proxy_url)
+            valid = (
+                proxy.scheme in ("http", "https") and bool(proxy.host)
+                and proxy.path in ("", "/") and not proxy.query and not proxy.fragment
+            )
+        except (httpx.InvalidURL, ValueError):
+            valid = False
+        if not valid:
+            raise ExternalDependencyError(
+                "GROQ_PROXY_URL 格式无效，请配置 HTTP/HTTPS 代理地址；代理凭据不会显示在错误中。"
+            ) from None
+
+    def _client(self) -> httpx.Client:
+        try:
+            return httpx.Client(
+                headers={"Authorization": f"Bearer {self.settings.groq_api_key}"},
+                timeout=httpx.Timeout(120, connect=15),
+                follow_redirects=False,
+                proxy=self.settings.groq_proxy_url,
+                trust_env=self.settings.groq_proxy_url is None,
+            )
+        except (httpx.InvalidURL, ValueError):
+            raise ExternalDependencyError(
+                "Groq 网络配置初始化失败，请检查 GROQ_PROXY_URL 和系统代理配置。"
+            ) from None
 
     def _stop(self, error: WorkflowError) -> WorkflowError:
         with self._error_lock:
@@ -177,7 +204,10 @@ class GroqTranscriber:
         if status == 401:
             detail = "Groq API Key 无效或已撤销，请更新本机 GROQ_API_KEY。"
         elif status == 403:
-            detail = "Groq 拒绝访问，请检查账号、模型权限及服务地域限制。"
+            detail = (
+                "Groq 拒绝访问；403 不一定是密钥错误，请检查服务器出口网络、"
+                "GROQ_PROXY_URL、账号及服务地域限制。"
+            )
         elif status == 429:
             detail = "Groq 请求频率或音频额度已达限制，请等待额度恢复后重试；未自动切换到收费服务。"
         elif status == 413:
@@ -191,9 +221,7 @@ class GroqTranscriber:
             if isinstance(error, dict):
                 for label, key in (("错误码", "code"), ("服务提示", "message")):
                     if error.get(key):
-                        value = str(error[key])
-                        if self.settings.groq_api_key:
-                            value = value.replace(self.settings.groq_api_key, "[REDACTED]")
+                        value = self._redact(str(error[key]))
                         context.append(f"{label}：{value[:500]}")
         except ValueError:
             pass
@@ -201,9 +229,20 @@ class GroqTranscriber:
         if request_id:
             context.append(f"Request ID：{request_id}")
         message = f"{detail}（{'；'.join(context)}）"
-        if self.settings.groq_api_key:
-            message = message.replace(self.settings.groq_api_key, "[REDACTED]")
-        return WorkflowError(message)
+        return WorkflowError(self._redact(message))
+
+    def _redact(self, message: str) -> str:
+        values = [self.settings.groq_api_key, self.settings.groq_proxy_url]
+        if self.settings.groq_proxy_url:
+            try:
+                proxy = httpx.URL(self.settings.groq_proxy_url)
+                values.extend([proxy.userinfo.decode("utf-8", errors="replace"), proxy.password])
+            except (httpx.InvalidURL, ValueError):
+                pass
+        for value in values:
+            if value:
+                message = message.replace(value, "[REDACTED]")
+        return message
 
 
 def _parse_segments(data: object, duration: float) -> list[TranscriptSegment]:
