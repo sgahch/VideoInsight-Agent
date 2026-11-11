@@ -187,3 +187,42 @@ Runtime package versions are recorded at
 `/opt/videoinsight/releases/9ff867c/runtime-packages.txt`. The public endpoint
 is still HTTP; this rollout does not add HTTPS or resolve separate platform
 download restrictions.
+
+## Bilibili HTTP 567 Fix
+
+On 2026-11-11, the original failed Bilibili link was reproduced on the server:
+an ordinary yt-dlp audio download returned HTTP 567, while a Range request to
+the same CDN succeeded. Using 1 MiB HTTP chunks downloaded the complete
+4,244,718-byte audio stream. The application now uses ranged downloads for
+Bilibili only, retains API-provided backup CDNs, checks selected candidates,
+limits per-node retries, and refreshes signed URLs on outer retries.
+Missing legacy fragments fail instead of silently producing partial media.
+No proxy allowlist, credentials, dependency versions, or global networking
+settings changed.
+
+- Application image: `videoinsight:243fe78`.
+- Both Windows and the isolated Linux runtime passed all 442 Python tests.
+- Real audio and merged source-video downloads succeeded; both files were
+  read through completely by ffmpeg and measured 196.5 seconds, consistent
+  with the API's rounded 197 seconds.
+- An actual application task for the original failed link completed download
+  and Groq transcription in about 13.1 seconds, producing 1,176 characters.
+  Detail view and used marker passed. The measured ASR input was 196.5 seconds.
+- The last speech timestamp was 183.33 seconds. An initial deployment
+  verification incorrectly required speech after 185 seconds and triggered
+  rollback despite successful transcription. Verification was corrected to
+  check measured audio completeness and valid timestamp bounds, then rerun.
+- Only isolated verification tasks were deleted. The original failed task
+  and all historical task counts were preserved; failed history is not
+  automatically resubmitted.
+
+Submissions were temporarily gated, all clients' tasks drained, and the old
+container, SQLite database, private environment, and Nginx config backed up
+before switching. The successful transaction's root-only backup is
+`/opt/videoinsight/backups/20261111-bilibili-243fe78-verified`.
+The previous application is stopped as
+`videoinsight-before-bilibili-243fe78-verified` with restart disabled.
+The original Nginx config was restored byte-for-byte and submissions reopened.
+Application and Groq sidecar reported healthy with no OOM events.
+The Groq sidecar and pre-existing unrelated containers retained their IDs
+and start times. All application environment settings were verified unchanged.
