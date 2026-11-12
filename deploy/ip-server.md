@@ -265,3 +265,68 @@ Runtime package versions are recorded at
 `/opt/videoinsight/releases/e17fd24/runtime-packages.txt`.
 The public IP endpoint remains HTTP. Use HTTPS or an encrypted SSH tunnel
 before importing real Cookies; this release does not add TLS.
+
+## Inline Douyin QR Login
+
+On 2026-11-12, inline web QR authorization replaced import-only mode for
+this server. Native Chrome/Edge windows are not required on the visitor's
+computer or the server.
+
+- Application image: `videoinsight:1451cb5`, including feature commit
+  `9e734a1` and the HttpOnly cookie/browser health fixes.
+- Private browser image:
+  `chromedp/headless-shell@sha256:830fa77e0602cb42e5cb2cbd9237ba27b649ad69d5fb82b54713aac8b7ab4f29`.
+- Browser container: `videoinsight-qr-browser`, Compose project `qr-browser`.
+  It shares `videoinsight-network` with the application and publishes no
+  ports. Do not expose its CDP port to the Internet.
+- Only `COOKIE_QR_BROWSER_URL=http://videoinsight-qr-browser:9222` was
+  added to the private application environment. Existing settings, API
+  keys, the private Groq route, and cookie storage were preserved.
+- The browser uses UID 65532, a read-only root, no capabilities,
+  no-new-privileges, 512 MiB memory, 0.75 CPU, 128 PIDs, a 64 MiB temporary
+  filesystem, and bounded logs. An earlier 384 MiB probe hit its memory
+  limit; the final configuration passed repeated real QR sessions without
+  an OOM event. The health probe uses HTTP/1.1 and keeps its request input
+  open briefly so the CDP forwarder can return its response.
+- Each login uses a disposable isolated browser context. Only one context
+  may be active. Status and cancellation are client-bound; another client
+  receives 404. Cancellation, failure, expiry, and shutdown release the
+  context. Login sessions expire automatically after 180 seconds even if
+  the page is closed.
+- Actual login cookies trigger an atomic private-file save, retaining
+  other platforms' cookies. HttpOnly Netscape rows are accepted by the
+  downloader. The web UI supports loading, countdown, refresh, cancellation,
+  expiry, and automatic retry of a pending link after confirmed login.
+
+Windows and the isolated Linux runtime each passed all 476 Python tests,
+with one existing dependency deprecation warning. Browser checks at
+1440x1000 and 390x844 verified real 512x512 QR images, refresh, cancellation,
+and no horizontal overflow. Cancellation was checked against the actual
+browser-context list. Staging and production API checks verified real QR
+pixels, client isolation, no-store responses, context cleanup, mock task
+completion, detail view, used marker, and test-task deletion. Production
+Groq model listing returned HTTP 200.
+
+No real Douyin account was authorized during verification; phone-side
+approval remains the account owner's action. Existing cookies and global
+historical task counts were unchanged. The temporary staging container,
+test browser, and SSH forwarding listener were removed or closed.
+
+The cutover gated submissions, drained all clients' queued/running tasks,
+and backed up SQLite, private environment, container configuration, and
+Nginx before switching. Root-only backup:
+`/opt/videoinsight/backups/20261112-inline-qr-1451cb5-verified`.
+The old application remains stopped as
+`videoinsight-before-inline-qr-1451cb5-verified`, with restart disabled.
+The Nginx vhost was restored byte-for-byte and submissions reopened.
+Application, QR browser, and Groq proxy are healthy. The Groq proxy and all
+pre-existing unrelated containers retained their IDs and start times.
+
+Browser configuration is maintained in
+`/opt/videoinsight/releases/1451cb5/deploy/qr-browser/compose.yaml`.
+Runtime packages are recorded at
+`/opt/videoinsight/releases/1451cb5/runtime-packages.txt`.
+The deployment does not require the operator's Windows computer or a tunnel
+to keep running. The public IP endpoint is still HTTP; use HTTPS or an
+encrypted SSH tunnel for real account authorization. This rollout does not
+add TLS or guarantee that platform risk controls will accept every download.

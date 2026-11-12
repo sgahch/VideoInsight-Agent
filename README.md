@@ -167,7 +167,9 @@ curl -X POST http://127.0.0.1:8000/tasks/<task_id>/chat `
 | `GET` | `/tasks/{id}/video` | 下载源视频（mp4） |
 | `POST` | `/cookies` | 上传 `cookies.txt` |
 | `GET` | `/cookies/status` | 查看 Cookies 状态 |
-| `POST` | `/cookies/qr/start` | 本地桌面扫码登录；无桌面服务不启用 |
+| `POST` | `/cookies/qr/start` | 启动网页内扫码（已配置私有浏览器）或本地桌面登录 |
+| `GET` | `/cookies/qr/{session_id}/status` | 查询本客户端扫码状态与二维码 |
+| `DELETE` | `/cookies/qr/{session_id}` | 取消本客户端的网页扫码会话 |
 | `POST` | `/cookies/browser/*` | 专用浏览器窗口抓取登录态 |
 | `GET` | `/health` | 探活（含是否启用鉴权） |
 | `POST` | `/auth/session` | 用访问令牌换取鉴权 Cookie |
