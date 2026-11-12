@@ -25,7 +25,7 @@ import secrets
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from app.account_auth import authenticated, login_required
+from app.account_auth import _owner, login_required, session_account
 from app.config import settings
 
 
@@ -39,7 +39,7 @@ AUTH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60
 # - "/" 与 /static：页面本身和它的 JS/CSS 得先加载出来，才能让用户输入令牌
 # - /health：探活
 # - /auth/session：它自己负责校验令牌并换成 Cookie
-PUBLIC_PATHS = frozenset({"/", "/login", "/health", "/auth/session", "/auth/login", "/auth/logout", "/auth/me"})
+PUBLIC_PATHS = frozenset({"/", "/login", "/register", "/health", "/auth/session", "/auth/login", "/auth/logout", "/auth/me", "/auth/register", "/auth/register/code"})
 PUBLIC_PREFIXES = ("/static/", "/view/")
 
 UNAUTHORIZED_DETAIL = "未授权：缺少或无效的访问令牌。"
@@ -73,13 +73,22 @@ async def auth_middleware(request: Request, call_next) -> Response:
     """未配置令牌 → 全放行；配置了 → 默认拒绝 + 白名单。"""
     expected = settings.auth_token
     account_enabled = login_required()
-    if account_enabled and (request.url.path in {"/", "/comments"} or request.url.path.startswith("/view/")) and not authenticated(request):
+    account = session_account(request)
+    if account_enabled and (request.url.path in {"/", "/comments"} or request.url.path.startswith("/view/")) and not account:
         return RedirectResponse("/login", status_code=303)
     if expected is None and not account_enabled:
         return await call_next(request)
-    if is_public_path(request.url.path):
+    if not (is_public_path(request.url.path) or account or (expected is not None and token_matches(extract_token(request), expected))):
+        LOGGER.warning("拒绝未授权请求：%s %s", request.method, request.url.path)
+        return JSONResponse(status_code=401, content={"detail": UNAUTHORIZED_DETAIL})
+    path = request.url.path
+    admin_only = (
+        (path == "/cookies" or path.startswith("/cookies/")) and path != "/cookies/status"
+    ) or (path.startswith("/comment-api/platforms/") and path.endswith("/cookies"))
+    if account and not account.is_admin and admin_only:
+        return JSONResponse(status_code=403, content={"detail": "仅管理员可以修改服务器平台授权。"})
+    token = _owner.set(account.owner if account else None)
+    try:
         return await call_next(request)
-    if authenticated(request) or (expected is not None and token_matches(extract_token(request), expected)):
-        return await call_next(request)
-    LOGGER.warning("拒绝未授权请求：%s %s", request.method, request.url.path)
-    return JSONResponse(status_code=401, content={"detail": UNAUTHORIZED_DETAIL})
+    finally:
+        _owner.reset(token)

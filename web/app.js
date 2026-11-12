@@ -217,6 +217,7 @@
     qrAttempts: 0,
     pendingCookieRetry: null,
     cookieAuthorization: null,
+    accountIsAdmin: true,
     parsedLink: null, // 最新的 /parse-link 解析结果（含干净 url 与建议标签）
     transcriptText: "",
     summaryText: "", // AI 总结原始 Markdown，供「复制」按钮使用
@@ -880,7 +881,7 @@
     } else if (task.status === "failed") {
       setTaskStatus("failed", task.error || "任务失败。");
       if (!task.result?.output) els.summaryOutput.textContent = task.error || "任务失败。";
-      if (task.request && isCookieFailure(task.error)) {
+      if (task.request && isCookieFailure(task.error) && state.accountIsAdmin) {
         state.pendingCookieRetry = {
           url: String(task.request.url || ""),
           mode: task.request.mode || "summary",
@@ -893,6 +894,8 @@
           "error",
         );
         renderCookieAuthorization(state.cookieAuthorization);
+      } else if (isCookieFailure(task.error) && !state.accountIsAdmin) {
+        setTaskStatus("failed", `${task.error || "平台登录态失效。"} 请联系管理员更新平台授权后重试。`);
       }
     } else if (task.status === "succeeded") {
       setTaskStatus("succeeded", "分析完成。");
@@ -2444,6 +2447,12 @@
       if (accountLoginEnabled) {
         const account = await fetchJson("/auth/me");
         if (!account.authenticated) window.location.replace("/login");
+        state.accountIsAdmin = account.is_admin !== false;
+        document.getElementById("accountLogout").title = account.username || "退出登录";
+        if (account.authenticated && account.is_admin === false) {
+          document.getElementById("cookies").hidden = true;
+          document.querySelectorAll('a[href="#cookies"]').forEach(link => { link.hidden = true; });
+        }
       }
       if (health.auth_required && !accountLoginEnabled) {
         els.authSection.hidden = false;

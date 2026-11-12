@@ -87,6 +87,12 @@ class Settings:
     auth_username: str = os.getenv("VIDEOINSIGHT_AUTH_USERNAME", "ynchen")
     auth_password_hash: str | None = os.getenv("VIDEOINSIGHT_AUTH_PASSWORD_HASH") or None
     auth_session_secret: str = os.getenv("VIDEOINSIGHT_SESSION_SECRET") or secrets.token_urlsafe(48)
+    registration_enabled: bool = _bool_env("VIDEOINSIGHT_REGISTRATION_ENABLED", False)
+    smtp_host: str = os.getenv("VIDEOINSIGHT_SMTP_HOST", "smtp.qq.com")
+    smtp_port: int = int(os.getenv("VIDEOINSIGHT_SMTP_PORT", "465"))
+    smtp_username: str | None = field(default=os.getenv("VIDEOINSIGHT_SMTP_USERNAME") or None, repr=False)
+    smtp_password: str | None = field(default=os.getenv("VIDEOINSIGHT_SMTP_PASSWORD") or None, repr=False)
+    auth_trusted_proxy_ips: str = os.getenv("VIDEOINSIGHT_TRUSTED_PROXY_IPS", "127.0.0.1,::1")
     # 任务记录的保留时长；<=0（默认）表示不按时间淘汰历史，只回收孤儿目录。
     # 刻意默认关闭：静默删除用户的历史记录比占点磁盘更糟。
     task_retention_hours: int = int(os.getenv("VIDEOINSIGHT_TASK_RETENTION_HOURS", "0"))

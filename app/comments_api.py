@@ -43,7 +43,14 @@ def start_for_analysis(url: str, client_id: str | None, config: Settings):
 
 
 def owner(request: Request) -> str:
-    return (request.headers.get("x-client-id") or request.cookies.get("videoinsight_client_id") or "").strip()[:200]
+    from app.account_auth import ACCOUNT_OWNER_PREFIX, account_owner
+
+    if account_owner():
+        return account_owner()
+    value = (request.headers.get("x-client-id") or request.cookies.get("videoinsight_client_id") or "").strip()[:200]
+    if value.startswith(ACCOUNT_OWNER_PREFIX):
+        raise HTTPException(403, "任务账号身份不能通过客户端指定。")
+    return value
 
 
 @router.get("/comments", include_in_schema=False)

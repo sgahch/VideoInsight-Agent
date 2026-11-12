@@ -25,4 +25,15 @@
 .login-error { color: #fca5a5; min-height: 24px; margin: 15px 0 10px; font-size: 12px; }
 .login-submit { width: 100%; height: 48px; justify-content: space-between; padding-inline: 18px; font-size: 14px; }
 .login-session-note { color: var(--text-dim); text-align: center; font-size: 11px; margin-top: 24px; }
+.account-tabs { display: flex; gap: 24px; border-bottom: 1px solid #303b4b; margin-top: 24px; }
+.account-tabs button { padding: 10px 0; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-muted); font: inherit; font-size: 14px; cursor: pointer; }
+.account-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.account-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.verification-row { display: grid; grid-template-columns: minmax(0, 1fr) 128px; gap: 10px; }
+.verification-row .btn { min-width: 0; padding: 0 10px; height: 48px; font-size: 12px; white-space: nowrap; border-radius: 6px; }
+.verification-status { font-size: 12px; line-height: 1.7; color: #6ee7b7; overflow-wrap: anywhere; margin-top: 10px; }
+.login-card { min-width: 0; }
+.login-field input { min-width: 0; }
+.login-card-note, .login-error { overflow-wrap: anywhere; }
+@media (max-width: 360px) { .verification-row { grid-template-columns: minmax(0, 1fr) 116px; gap: 6px; } }
 @media (max-width: 800px) { .login-page { padding: 28px 20px; } .login-shell { max-width: 440px; grid-template-columns: 1fr; gap: 32px; } .login-intro { min-height: auto; gap: 32px; } .login-story h1 { font-size: 30px; } .login-eyebrow, .login-description, .login-features, .login-footnote { display: none; } .login-card { padding: 30px 25px; } }

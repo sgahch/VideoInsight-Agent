@@ -173,6 +173,10 @@ curl -X POST http://127.0.0.1:8000/tasks/<task_id>/chat `
 | `POST` | `/cookies/browser/*` | 专用浏览器窗口抓取登录态 |
 | `GET` | `/health` | 探活（含是否启用鉴权） |
 | `POST` | `/auth/session` | 用访问令牌换取鉴权 Cookie |
+| `POST` | `/auth/login` | 管理员账号或已验证邮箱登录 |
+| `POST` | `/auth/register/code` | 发送邮箱注册验证码 |
+| `POST` | `/auth/register` | 校验邮箱验证码，创建账号并登录 |
+| `GET` | `/auth/me` | 当前账号和注册开放状态（不含凭据） |
 
 > 除 `/`、`/static/*`、`/health`、`/auth/session` 外，**设置 `VIDEOINSIGHT_AUTH_TOKEN`
 > 后所有端点都需要令牌**；不设置则全部开放。
@@ -196,6 +200,46 @@ curl -X DELETE http://127.0.0.1:8000/tasks/<task_id>
 >
 > ⚠️ `client_id` 是浏览器自造的 UUID，**是隔离约定，不是身份认证**：它只防止
 > 前端串号，任何人都能伪造一个。真正的访问控制见下方「访问鉴权」。
+
+</details>
+
+<details>
+<summary><b>邮箱注册与账号登录</b></summary>
+
+先设置管理员账号 `VIDEOINSIGHT_AUTH_USERNAME`、PBKDF2 哈希
+`VIDEOINSIGHT_AUTH_PASSWORD_HASH` 和持久化的 `VIDEOINSIGHT_SESSION_SECRET`。
+管理员登录保持兼容，原浏览器历史不会重新归属或自动公开给注册用户。
+
+在私有环境文件中配置以下变量并重新创建应用容器：
+
+```dotenv
+VIDEOINSIGHT_REGISTRATION_ENABLED=true
+VIDEOINSIGHT_SMTP_HOST=smtp.qq.com
+VIDEOINSIGHT_SMTP_PORT=465
+VIDEOINSIGHT_SMTP_USERNAME=your-mailbox@qq.com
+VIDEOINSIGHT_SMTP_PASSWORD=
+```
+
+SMTP 密码应为邮箱授权码，不是邮箱登录密码；不要提交真实配置到 Git。
+邮件通过验证证书的 TLS 连接发送，不支持明文 SMTP。配置不完整或注册开关
+关闭时，页面隐藏注册入口，接口拒绝注册，不影响已有账号登录。
+
+登录页选择「邮箱注册」，验证邮箱并设置至少 10 位密码即可自动登录。
+验证码为 6 位、10 分钟有效、仅能使用一次，错误 5 次后失效。
+同邮箱 60 秒内不能重发；每邮箱每小时最多 10 次、每来源 IP 每小时 20 次，
+全局每小时 50 次、每天 200 次。发信计数和验证码摘要保存在 SQLite，
+重启不重置限流；验证码原文和 SMTP 授权码不返回浏览器。
+
+注册账号的任务、媒体和评论归属由服务器签名会话决定，不能通过
+`client_id`、`X-Client-ID` 或浏览器身份 Cookie 指定，可跨设备登录访问。
+注册账号不能修改服务器共用的平台 Cookies；这些授权仍由管理员维护。
+账号和验证码表与任务共用数据库，备份时一并保留。
+
+反向代理部署时，将 `VIDEOINSIGHT_TRUSTED_PROXY_IPS` 设为实际代理的对端 IP；
+仅对这些对端信任 `X-Real-IP`，并确保代理覆盖此头。不会使用调用方的
+`X-Forwarded-For`。不要设置任意公网来源。
+公网必须自行启用 HTTPS。开放注册会允许验证过邮箱的用户使用服务器已配置
+的云端模型和全局任务队列，请根据资源预算决定是否开放。
 
 </details>
 
@@ -224,7 +268,7 @@ Web 界面在「访问令牌」面板填入令牌，验证通过后自动记住�
 洞；中间件按"默认拒绝 + 公开白名单"工作，新路由自动受保护。令牌比较使用
 `secrets.compare_digest`，避免计时侧信道。
 
-> ⚠️ 这是**单个共享密钥**：没有账号体系、没有权限粒度，也不负责 TLS。适合
+> ⚠️ 共享令牌本身是**单个共享密钥**，不区分邮箱账号，也不负责 TLS。适合
 > 反向代理之后或私有网络内的部署；直接裸奔在公网上仍需自行加一层认证与限流。
 
 </details>

@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.cleanup import remove_task_artifacts, run_cleanup
 from app.config import settings
-from app.account_auth import login_required, router as account_router
+from app.account_auth import ACCOUNT_OWNER_PREFIX, account_owner, login_required, router as account_router
 from app.comments_api import router as comments_router
 from app.adapters.asr import format_transcript
 from app.adapters.downloader import YtDlpDownloader, default_cookies_file, resolve_cookies_file, select_downloader
@@ -66,7 +66,11 @@ task_queue = TaskQueue(
 
 def _client_id_from_header(x_client_id: str | None = None) -> str | None:
     """从请求头取客户端身份标识，去空白；空串视为未提供。"""
+    if account_owner():
+        return account_owner()
     value = (x_client_id or "").strip()
+    if value.startswith(ACCOUNT_OWNER_PREFIX):
+        raise HTTPException(403, "任务账号身份不能通过客户端指定。")
     return value or None
 
 
@@ -216,6 +220,10 @@ def _install_loop_exception_handler() -> None:
 @app.middleware("http")
 async def persist_client_session(request: Request, call_next):
     response = await call_next(request)
+    if account_owner():
+        return response
+    if request.headers.get("x-client-id", "").strip().startswith(ACCOUNT_OWNER_PREFIX):
+        return response
     client_id = _client_id_from_header(request.headers.get("x-client-id"))
     if client_id and request.cookies.get(CLIENT_COOKIE_NAME) != client_id:
         response.set_cookie(
@@ -332,7 +340,9 @@ def submit_analysis(
     request: AnalyzeRequest,
     x_client_id: str | None = Header(default=None, description="客户端身份标识（浏览器持久化 UUID）"),
 ) -> AnalyzeResponse:
-    if not request.client_id:
+    if request.client_id and request.client_id.startswith(ACCOUNT_OWNER_PREFIX) and not account_owner():
+        raise HTTPException(403, "任务账号身份不能通过客户端指定。")
+    if account_owner() or not request.client_id:
         # 允许请求体显式携带，也允许通过 header 传递；取其一
         request.client_id = _client_id_from_header(x_client_id)
 

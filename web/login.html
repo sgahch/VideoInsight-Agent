@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>登录 · VideoInsight Agent</title>
   <link rel="stylesheet" href="/static/styles.css?v=20261023-login" />
-  <link rel="stylesheet" href="/static/login.css?v=20261023-login" />
+  <link rel="stylesheet" href="/static/login.css?v=20261112-email" />
 </head>
 <body class="login-page">
   <main class="login-shell">
@@ -21,17 +21,30 @@
     </section>
     <section class="login-card" aria-labelledby="login-title">
       <span class="login-card-label">你的专属工作台</span>
+      <div class="account-tabs" role="tablist" aria-label="账号">
+        <button id="loginTab" type="button" role="tab" aria-selected="true" aria-controls="loginForm">登录</button>
+        <button id="registerTab" type="button" role="tab" aria-selected="false" aria-controls="registerForm" hidden>邮箱注册</button>
+      </div>
       <h2 id="login-title">欢迎回来</h2>
-      <p class="login-card-note">登录账号，继续探索视频中的价值。</p>
-      <form id="loginForm">
-        <div class="login-field"><label for="username">账号</label><input class="form-input" id="username" name="username" autocomplete="username" placeholder="请输入账号" required maxlength="100" autofocus /></div>
+      <p id="accountNote" class="login-card-note">登录账号，继续探索视频中的价值。</p>
+      <form id="loginForm" role="tabpanel" aria-labelledby="loginTab">
+        <div class="login-field"><label for="username">账号 / 邮箱</label><input class="form-input" id="username" name="username" autocomplete="username" placeholder="请输入账号或邮箱" required maxlength="254" autofocus /></div>
         <div class="login-field"><label for="password">密码</label><div class="login-password"><input class="form-input" id="password" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required maxlength="512" /><button id="togglePassword" type="button" aria-label="显示密码" aria-pressed="false">显示</button></div></div>
         <p id="loginError" class="login-error" role="alert" aria-live="polite"></p>
         <button id="loginSubmit" class="btn btn-primary login-submit" type="submit">登录工作台 <span aria-hidden="true">→</span></button>
       </form>
-      <p class="login-session-note">登录状态保留 7 天 · 请使用管理员提供的账号</p>
+      <form id="registerForm" role="tabpanel" aria-labelledby="registerTab" hidden>
+        <div class="login-field"><label for="registerEmail">邮箱</label><input class="form-input" id="registerEmail" name="email" type="email" autocomplete="email" placeholder="请输入邮箱地址" maxlength="254" required /></div>
+        <div class="login-field"><label for="registerCode">邮箱验证码</label><div class="verification-row"><input class="form-input" id="registerCode" name="code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="6 位验证码" required /><button id="sendCode" class="btn btn-secondary" type="button">获取验证码</button></div></div>
+        <p id="codeStatus" class="verification-status" role="status" aria-live="polite"></p>
+        <div class="login-field"><label for="registerPassword">设置密码</label><input class="form-input" id="registerPassword" name="password" type="password" autocomplete="new-password" placeholder="至少 10 位，最多 128 位" minlength="10" maxlength="128" required /></div>
+        <div class="login-field"><label for="confirmPassword">确认密码</label><input class="form-input" id="confirmPassword" name="confirmPassword" type="password" autocomplete="new-password" placeholder="再次输入密码" minlength="10" maxlength="128" required /></div>
+        <p id="registerError" class="login-error" role="alert" aria-live="polite"></p>
+        <button id="registerSubmit" class="btn btn-primary login-submit" type="submit">注册并登录 <span aria-hidden="true">→</span></button>
+      </form>
+      <p class="login-session-note">登录状态保留 7 天</p>
     </section>
   </main>
-  <script src="/static/login.js?v=20261023-login" defer></script>
+  <script src="/static/login.js?v=20261112-email" defer></script>
 </body>
 </html>
