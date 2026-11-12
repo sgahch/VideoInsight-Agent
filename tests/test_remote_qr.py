@@ -245,6 +245,31 @@ def test_cookie_write_failure_preserves_previous_file(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".qr-cookies-*"))
 
 
+def test_saved_http_only_login_is_usable_by_douyin_downloader(login, monkeypatch):
+    import app.adapters.downloader as downloader
+
+    _, _, config = login
+    save_douyin_login_cookies(config.ytdlp_cookies_file, [COOKIE])
+    monkeypatch.setattr(downloader, "settings", config)
+    assert downloader.is_usable_cookies_file(config.ytdlp_cookies_file)
+    assert downloader.DouyinShareDownloader(config.ytdlp_cookies_file.parent / "tmp")._douyin_cookie_header() == "sessionid=dummy-login"
+
+
+def test_douyin_header_rejects_lookalike_domains(login, monkeypatch):
+    import app.adapters.downloader as downloader
+
+    _, _, config = login
+    config.ytdlp_cookies_file.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "#HttpOnly_.douyin.com\tTRUE\t/\tFALSE\t2000000000\tsessionid\tkeep\n"
+        ".evildouyin.com\tTRUE\t/\tFALSE\t2000000000\tevil\treject\n"
+        ".iesdouyin.com\tTRUE\t/\tFALSE\t2000000000\tttwid\tlegacy\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(downloader, "settings", config)
+    assert downloader.DouyinShareDownloader(config.ytdlp_cookies_file.parent / "tmp")._douyin_cookie_header() == "sessionid=keep; ttwid=legacy"
+
+
 def test_inline_qr_api_binds_owner_and_disables_caching(login, monkeypatch):
     manager, browser, config = login
     monkeypatch.setattr(main_module, "settings", config)

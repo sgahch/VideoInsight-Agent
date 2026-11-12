@@ -18,6 +18,7 @@ import httpx
 from app.adapters.audio import resolve_ffmpeg
 from app.adapters.bilibili import is_bilibili_video_url, resolve_bilibili_info
 from app.config import Settings, settings
+from app.cookies import is_douyin_domain
 from app.errors import ExternalDependencyError, WorkflowError
 
 
@@ -506,14 +507,15 @@ class DouyinShareDownloader:
         except OSError:
             return ""
         for line in lines:
-            line = line.strip()
+            line = line.strip().removeprefix("#HttpOnly_")
             if not line or line.startswith("#"):
                 continue
             parts = line.split("\t")
             if len(parts) < 7:
                 continue
             domain, name, value = parts[0], parts[5], parts[6]
-            if not domain.endswith("douyin.com"):
+            host = domain.lstrip(".").lower()
+            if not is_douyin_domain(host) and host != "iesdouyin.com" and not host.endswith(".iesdouyin.com"):
                 continue
             pairs.setdefault(name, value)
         return "; ".join(f"{name}={value}" for name, value in pairs.items())
@@ -671,7 +673,10 @@ def is_usable_cookies_file(path: Path) -> bool:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
-    return any(line.strip() and not line.startswith("#") and "\t" in line for line in lines)
+    return any(
+        line.strip() and (not line.startswith("#") or line.startswith("#HttpOnly_")) and "\t" in line
+        for line in lines
+    )
 
 
 def _best_effort_unlink(path: Path) -> None:

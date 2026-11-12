@@ -7,7 +7,7 @@ services:
     user: "65532:65532"
     read_only: true
     tmpfs:
-      - /tmp:rw,nosuid,nodev,size=128m,mode=1777
+      - /tmp:rw,nosuid,nodev,size=64m,mode=1777
     environment:
       HOME: /tmp
       XDG_CACHE_HOME: /tmp/cache
@@ -16,9 +16,13 @@ services:
       - --disable-dev-shm-usage
       - --user-data-dir=/tmp/profile
       - --no-first-run
+      - --no-zygote
+      - --renderer-process-limit=2
+      - --disable-background-networking
+      - --disable-extensions
       - about:blank
-    mem_limit: 384m
-    memswap_limit: 384m
+    mem_limit: 512m
+    memswap_limit: 512m
     cpus: 0.75
     pids_limit: 128
     cap_drop:
@@ -33,7 +37,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - "printf 'GET /json/version HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' | socat -T 3 - TCP4:127.0.0.1:9222,connect-timeout=3 | grep -q webSocketDebuggerUrl"
+        - "{ printf 'GET /json/version HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n'; sleep 1; } | socat -T 3 - TCP4:127.0.0.1:9222,connect-timeout=3 | grep -q webSocketDebuggerUrl"
       interval: 30s
       timeout: 5s
       start_period: 10s
