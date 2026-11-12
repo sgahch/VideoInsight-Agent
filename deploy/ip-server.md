@@ -330,3 +330,69 @@ The deployment does not require the operator's Windows computer or a tunnel
 to keep running. The public IP endpoint is still HTTP; use HTTPS or an
 encrypted SSH tunnel for real account authorization. This rollout does not
 add TLS or guarantee that platform risk controls will accept every download.
+
+## Email Registration
+
+On 2026-11-12, verified email registration was deployed with application
+image `videoinsight:cd109bd`. The existing administrator login remains valid.
+
+- The login page includes an email registration tab, also available at
+  `/register`. Registration requires a six-digit email code and a password
+  of 10 to 128 characters, then signs the new account in automatically.
+- QQ SMTP uses certificate-verified TLS on port 465. Sender credentials
+  exist only in the private server environment, not Git or browser assets.
+  Server-side TLS and SMTP authentication succeeded. QQ accepted one real
+  registration-code email; inbox delivery was not independently inspected.
+- Codes expire after 10 minutes, are single-use, allow five incorrect
+  attempts, and have a 60-second resend cooldown. Durable SQLite limits
+  cover each email, source IP, and global send volume. Code digests use
+  HMAC; account passwords use salted PBKDF2 hashes.
+- Signed HttpOnly sessions bind task ownership to the account rather than
+  a browser-supplied client ID. Cross-device login retains access to the
+  account's tasks; another account cannot read or delete them by forging
+  headers. Existing administrator/browser history is preserved, not
+  automatically assigned to newly registered accounts.
+- Registered users cannot change shared platform Cookies or start the
+  administrator's QR authorization. They share the server's configured
+  models and worker queue; per-account analysis quotas are not included.
+- Only registration enablement, QQ SMTP host/port/username/password, and
+  trusted reverse-proxy peer settings were added to the private environment.
+  The Nginx-overwritten `X-Real-IP` is accepted only from those peers;
+  untrusted forwarded headers cannot choose the registration rate-limit IP.
+
+Windows and the isolated Linux runtime each passed all 504 Python tests,
+with one existing dependency deprecation warning. Desktop and mobile
+browser checks covered code sending, registration, logout, and email login.
+Production verification covered administrator compatibility, two isolated
+synthetic accounts, task completion, cross-device access, detail view, used
+marker, authorization restrictions, Groq model listing (HTTP 200), and the
+private QR browser connection. The synthetic accounts and tasks were removed.
+
+The first cutover automatically rolled back because the verification
+cleanup expected HTTP 200 instead of the deletion endpoint's correct 204.
+After correcting the verification script, the cutover passed without
+resending the real test email. Historical task counts and existing platform
+Cookies were unchanged.
+
+Submissions and registration were temporarily gated while queued/running
+tasks drained. SQLite, private environment, container configuration, and
+Nginx were backed up before switching. The successful transaction's
+root-only backup is
+`/opt/videoinsight/backups/20261112-registration-cd109bd-verified2`.
+The previous application remains stopped as
+`videoinsight-before-registration-cd109bd-verified2`, with restart disabled.
+The first transaction's backup and stopped failed candidate are retained.
+
+The original Nginx configuration was restored byte-for-byte and submissions
+reopened. Application, Groq proxy, and private QR browser are healthy with no
+OOM events. The proxy, browser, StarDevil, and other pre-existing containers
+retained their IDs and start times. The private environment and database
+have mode 0600; the backup directory has mode 0700. Public checks passed for
+registration pages, static assets, authentication guards, and invalid-input
+rejection, without sending another email.
+
+Runtime packages are recorded at
+`/opt/videoinsight/releases/cd109bd/runtime-packages.txt`.
+The public IP endpoint remains HTTP. Add HTTPS or use an encrypted tunnel
+before transmitting real passwords or platform login credentials over an
+untrusted network. This release does not add TLS.
