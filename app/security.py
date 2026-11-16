@@ -1,7 +1,7 @@
-"""可选的共享令牌鉴权。
+"""账号会话及可选的共享令牌鉴权。
 
-**默认关闭**：未设置 `VIDEOINSIGHT_AUTH_TOKEN` 时所有请求照常通过，本地使用
-零摩擦、行为与之前完全一致。设置之后，除公开路径外的**所有**请求都必须带令牌。
+仅当账号登录和共享令牌均未配置时放行。开启任一模式后，非公开路径要求有效的
+账号会话或共享令牌；独立登录回调仍在各自端点验证其凭证。
 
 令牌可以三种方式提供：
 
@@ -39,7 +39,12 @@ AUTH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60
 # - "/" 与 /static：页面本身和它的 JS/CSS 得先加载出来，才能让用户输入令牌
 # - /health：探活
 # - /auth/session：它自己负责校验令牌并换成 Cookie
-PUBLIC_PATHS = frozenset({"/", "/login", "/register", "/health", "/auth/session", "/auth/login", "/auth/logout", "/auth/me", "/auth/register", "/auth/register/code"})
+PUBLIC_PATHS = frozenset({
+    "/", "/login", "/register", "/forgot-password", "/health", "/auth/session",
+    "/auth/login", "/auth/logout", "/auth/me", "/auth/register", "/auth/register/code",
+    "/auth/password/reset", "/auth/password/reset/code",
+    "/cookies/helper/claim", "/cookies/helper/complete", "/cookies/helper/fail", "/cookies/helper/progress",
+})
 PUBLIC_PREFIXES = ("/static/", "/view/")
 
 UNAUTHORIZED_DETAIL = "未授权：缺少或无效的访问令牌。"
@@ -70,11 +75,15 @@ def token_matches(provided: str | None, expected: str) -> bool:
 
 
 async def auth_middleware(request: Request, call_next) -> Response:
-    """未配置令牌 → 全放行；配置了 → 默认拒绝 + 白名单。"""
+    """未配置任何登录保护时放行，否则验证账号会话或共享令牌。"""
+    trusted = {item.strip() for item in settings.auth_trusted_proxy_ips.split(",")}
+    forwarded_scheme = request.headers.get("x-forwarded-proto")
+    if request.client and request.client.host in trusted and forwarded_scheme in {"http", "https"}:
+        request.scope["scheme"] = forwarded_scheme
     expected = settings.auth_token
     account_enabled = login_required()
     account = session_account(request)
-    if account_enabled and (request.url.path in {"/", "/comments"} or request.url.path.startswith("/view/")) and not account:
+    if account_enabled and (request.url.path in {"/", "/comments", "/account"} or request.url.path.startswith("/view/")) and not account:
         return RedirectResponse("/login", status_code=303)
     if expected is None and not account_enabled:
         return await call_next(request)
@@ -82,11 +91,9 @@ async def auth_middleware(request: Request, call_next) -> Response:
         LOGGER.warning("拒绝未授权请求：%s %s", request.method, request.url.path)
         return JSONResponse(status_code=401, content={"detail": UNAUTHORIZED_DETAIL})
     path = request.url.path
-    admin_only = (
-        (path == "/cookies" or path.startswith("/cookies/")) and path != "/cookies/status"
-    ) or (path.startswith("/comment-api/platforms/") and path.endswith("/cookies"))
+    admin_only = path.startswith("/cookies/browser/")
     if account and not account.is_admin and admin_only:
-        return JSONResponse(status_code=403, content={"detail": "仅管理员可以修改服务器平台授权。"})
+        return JSONResponse(status_code=403, content={"detail": "普通账号请使用页内扫码或导入自己的 Cookies。"})
     token = _owner.set(account.owner if account else None)
     try:
         return await call_next(request)

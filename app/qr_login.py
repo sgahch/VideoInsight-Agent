@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from app.browser_cookies import BrowserCookieError, capture_douyin_cookies, cookie_browser_status, start_cookie_browser
 from app.config import Settings, settings
+from app.account_auth import account_owner
 from app.adapters.downloader import cookie_storage_path
-from app.cookies import summarize_cookie_file
+from app.cookies import cookie_logout_path, summarize_cookie_file
 from app.remote_qr import RemoteQRLoginError, remote_qr_manager
 
 
@@ -16,10 +17,17 @@ def start_qr_login(runtime_settings: Settings = settings, owner: str | None = "l
         if not owner:
             raise RemoteQRLoginError("请刷新页面后重新扫码登录。")
         return remote_qr_manager.start(runtime_settings, owner)
+    if account_owner():
+        raise QRLoginError("页内扫码服务尚未配置，请导入自己的 Cookies，或联系管理员启用扫码服务。")
     try:
         # Reuse the persistent dedicated profile. Clearing it here forced a full
         # QR/SMS login every time the user clicked the login button.
-        browser = start_cookie_browser(runtime_settings)
+        marker = cookie_logout_path(cookie_storage_path(runtime_settings))
+        if marker.exists():
+            browser = start_cookie_browser(runtime_settings, reset_session=True)
+            marker.unlink(missing_ok=True)
+        else:
+            browser = start_cookie_browser(runtime_settings)
     except BrowserCookieError as exc:
         raise QRLoginError(str(exc)) from exc
     return {
@@ -34,8 +42,10 @@ def start_qr_login(runtime_settings: Settings = settings, owner: str | None = "l
 def check_qr_login(session_id: str, runtime_settings: Settings = settings, owner: str | None = "legacy") -> dict[str, object]:
     if session_id != "browser":
         return remote_qr_manager.status(session_id, owner)
-    if session_id != "browser":
-        raise QRLoginError("没有找到二维码会话，请重新打开扫码登录窗口。")
+    if account_owner():
+        raise RemoteQRLoginError("二维码会话不存在，请重新生成。", 404)
+    if cookie_logout_path(cookie_storage_path(runtime_settings)).exists():
+        return _payload("cancelled", "登录态已清除，请重新开始扫码。", False, {}, runtime_settings)
 
     try:
         status = cookie_browser_status(runtime_settings)

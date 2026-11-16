@@ -13,10 +13,10 @@ from fastapi.staticfiles import StaticFiles
 
 from app.cleanup import remove_task_artifacts, run_cleanup
 from app.config import settings
-from app.account_auth import ACCOUNT_OWNER_PREFIX, account_owner, login_required, router as account_router
-from app.comments_api import router as comments_router
+from app.account_auth import ACCOUNT_OWNER_PREFIX, _check_origin, account_owner, login_required, router as account_router
+from app.comments_api import private_service_params, router as comments_router, service_request
 from app.adapters.asr import format_transcript
-from app.adapters.downloader import YtDlpDownloader, default_cookies_file, resolve_cookies_file, select_downloader
+from app.adapters.downloader import YtDlpDownloader, browser_cookie_fallback_allowed, cookie_storage_path, resolve_cookies_file, select_downloader
 from app.adapters.llm import MockLlmAnalyzer, OpenAICompatibleAnalyzer
 from app.browser_cookies import BrowserCookieError, capture_douyin_cookies, cookie_browser_capabilities, cookie_browser_status, start_cookie_browser
 from app.cookies import summarize_cookie_file, write_normalized_cookie_file
@@ -24,6 +24,9 @@ from app.errors import VideoInsightError
 from app.qr_login import QRLoginError, check_qr_login, start_qr_login
 from app.remote_qr import RemoteQRLoginError, remote_qr_manager
 from app.link_parser import parse_share_text
+from app.local_login import cancel_for_account, capabilities as helper_capabilities, router as helper_router
+from app.media_urls import canonical_media_url
+from app.url_safety import UnsafeURL
 from app.schemas import (
     AnalysisMode,
     AnalysisResult,
@@ -241,6 +244,7 @@ async def persist_client_session(request: Request, call_next):
 app.middleware("http")(auth_middleware)
 app.include_router(account_router)
 app.include_router(comments_router)
+app.include_router(helper_router)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = PROJECT_ROOT / "web"
@@ -248,7 +252,7 @@ WEB_DIR = PROJECT_ROOT / "web"
 
 def _cookie_storage_path() -> Path:
     """Keep the API endpoint aligned with the downloader's configured cookie path."""
-    return settings.ytdlp_cookies_file or default_cookies_file(settings)
+    return cookie_storage_path(settings)
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
@@ -276,7 +280,7 @@ def health() -> dict[str, object]:
         "results_dir": str(settings.results_dir),
         "media_dir": str(settings.media_dir),
         "cookies_file": bool(resolve_cookies_file(settings)),
-        "cookies_from_browser": settings.ytdlp_cookies_from_browser,
+        "cookies_from_browser": settings.ytdlp_cookies_from_browser if browser_cookie_fallback_allowed(settings) else None,
         # Report configuration only; platform access is checked by each crawl job.
         "comment_source": (
             "mediacrawler-service" if settings.comment_crawler_url and settings.comment_crawler_token
@@ -353,6 +357,11 @@ def submit_analysis(
         request.url = parsed.url
         if not request.label and parsed.label:
             request.label = parsed.label
+    if account_owner():
+        try:
+            request.url = canonical_media_url(request.url)
+        except UnsafeURL as exc:
+            raise HTTPException(400, str(exc)) from exc
     task = task_store.create(request)
     try:
         task_queue.submit(task.task_id, task_store, run_analysis_task, task.task_id, request, task_store)
@@ -416,7 +425,9 @@ def submit_file_analysis(
 @app.post("/cookies")
 def upload_cookies(file: UploadFile = File(...)) -> dict[str, object]:
     target = _cookie_storage_path()
-    raw = file.file.read()
+    raw = file.file.read(256 * 1024 + 1)
+    if len(raw) > 256 * 1024:
+        raise HTTPException(status_code=413, detail="Cookies 文件不能超过 256 KB。")
     try:
         write_normalized_cookie_file(target, raw)
     except ValueError as exc:
@@ -430,10 +441,36 @@ def upload_cookies(file: UploadFile = File(...)) -> dict[str, object]:
 
 
 @app.get("/cookies/status")
-def get_cookies_status() -> dict[str, object]:
+def get_cookies_status(request: Request, response: Response) -> dict[str, object]:
+    response.headers["Cache-Control"] = "private, no-store"
     return {
         **summarize_cookie_file(_cookie_storage_path()),
         "authorization": cookie_browser_capabilities(settings),
+        "scope": "account" if account_owner() else "administrator",
+        "local_helper": helper_capabilities(request, settings),
+    }
+
+
+@app.delete("/cookies")
+def clear_cookies(request: Request, response: Response) -> dict[str, object]:
+    _check_origin(request)
+    response.headers["Cache-Control"] = "private, no-store"
+    try:
+        with cancel_for_account(request, settings):
+            removed = remote_qr_manager.clear_cookies(settings, account_owner())
+    except (OSError, ValueError):
+        raise HTTPException(500, "登录态清除失败，请稍后重试；原有任务未受影响。") from None
+    comments_cleared = True
+    if settings.comment_crawler_url and settings.comment_crawler_token:
+        try:
+            service_request("DELETE", "/platforms/dy/cookies", config=settings,
+                            **private_service_params(settings))
+        except HTTPException:
+            comments_cleared = False
+    return {
+        "cleared": True, "removed": removed, "comments_cleared": comments_cleared,
+        "scope": "account" if account_owner() else "administrator",
+        "message": "已清除本账号保存的抖音登录态。",
     }
 
 
@@ -733,8 +770,8 @@ def test_llm_config(request: LlmTestRequest) -> dict[str, object]:
         result = llm.probe()
     except VideoInsightError as exc:
         return {"ok": False, "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001 - 自检接口要把任何异常转成可读结果
-        return {"ok": False, "error": f"连接失败：{exc}"}
+    except Exception:
+        return {"ok": False, "error": "连接测试失败，请检查模型配置或稍后重试。"}
     return result
 
 

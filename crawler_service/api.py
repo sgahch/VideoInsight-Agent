@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from crawler_service.runtime import PROJECT_ROOT, runtime_status, state_dir
 from crawler_service.store import CommentScope, CommentSort, PLATFORMS, Store
+from crawler_service.cookie_storage import cookie_path
 
 STATE = state_dir()
 store = Store(STATE / "comments.db")
@@ -122,16 +123,16 @@ class BrowserImport(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "platforms": PLATFORMS, "runtime": runtime_status()}
+    return {"status": "ok", "platforms": PLATFORMS, "runtime": runtime_status(), "account_cookies": True}
 
 
 @app.get("/platforms")
-def platforms():
-    return [{"id": platform, "name": name, "cookies_configured": (STATE / "cookies" / f"{platform}.txt").exists()} for platform, name in PLATFORMS.items()]
+def platforms(owner: str = ""):
+    return [{"id": platform, "name": name, "cookies_configured": cookie_path(STATE, platform, owner).exists()} for platform, name in PLATFORMS.items()]
 
 
 @app.put("/platforms/{platform}/cookies")
-def save_cookies(platform: str, payload: Cookies):
+def save_cookies(platform: str, payload: Cookies, owner: str = ""):
     if platform not in PLATFORMS:
         raise HTTPException(404)
     text = payload.content.strip()
@@ -155,8 +156,8 @@ def save_cookies(platform: str, payload: Cookies):
         text = text.split(":", 1)[1].strip()
     if not text or "=" not in text or any(c in text for c in ("\r", "\n", "\x00")):
         raise HTTPException(400, "请导入 Cookie 请求头、Netscape 文件或浏览器导出的 JSON。")
-    path = STATE / "cookies" / f"{platform}.txt"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = cookie_path(STATE, platform, owner)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp-" + secrets.token_hex(8))
     temporary.touch(mode=0o600)
     temporary.write_text(text, encoding="utf-8")
@@ -165,10 +166,10 @@ def save_cookies(platform: str, payload: Cookies):
 
 
 @app.delete("/platforms/{platform}/cookies")
-def delete_cookies(platform: str):
+def delete_cookies(platform: str, owner: str = ""):
     if platform not in PLATFORMS:
         raise HTTPException(404)
-    (STATE / "cookies" / f"{platform}.txt").unlink(missing_ok=True)
+    cookie_path(STATE, platform, owner).unlink(missing_ok=True)
     return {"deleted": True}
 
 

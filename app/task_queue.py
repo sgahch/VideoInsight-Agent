@@ -24,6 +24,7 @@ from threading import Condition, RLock
 from typing import Callable
 
 from app.config import Settings
+from app.account_auth import task_account_scope
 from app.schemas import AnalyzeRequest, TaskStatus
 from app.task_store import SQLiteTaskStore
 
@@ -121,7 +122,11 @@ class TaskQueue:
         # Register the completion callback before even an immediate target can finish.
         with self._condition:
             pass
-        work.target(*work.args)
+        task = work.store.get(work.task_id)
+        if task is None:
+            return
+        with task_account_scope(task.request.client_id):
+            work.target(*work.args)
 
     def _finished(self, work: _Work, future: Future) -> None:
         try:

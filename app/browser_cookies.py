@@ -10,12 +10,14 @@ from urllib.error import HTTPError, URLError
 from itertools import count
 from pathlib import Path
 from shutil import which
-from time import sleep
+from time import sleep, time
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from app.adapters.downloader import cookie_storage_path
+from app.account_auth import account_owner
 from app.config import Settings, settings
-from app.cookies import cookie_objects_to_netscape
+from app.cookies import cookie_objects_to_netscape, is_douyin_domain, write_normalized_cookie_file
 
 
 BASE_DEBUG_PORT = int(os.getenv("COOKIE_CAPTURE_DEBUG_PORT", "9222"))
@@ -45,7 +47,9 @@ def cookie_browser_capabilities(runtime_settings: Settings = settings) -> dict[s
             "mode": "remote", "desktop_available": False, "qr_available": True, "reason": None,
             "message": "请在本页扫码登录，无需打开服务器桌面窗口。",
         }
-    if mode not in {"auto", "desktop", "import"} or mode == "import":
+    if account_owner():
+        reason = "account_requires_private_login"
+    elif mode not in {"auto", "desktop", "import"} or mode == "import":
         reason = "configured_import"
     elif mode == "auto" and not _has_desktop_display():
         reason = "headless"
@@ -166,7 +170,7 @@ def cookie_browser_status(runtime_settings: Settings = settings) -> dict[str, ob
         "running": True,
         "port": debug_port,
         "tabs": visible_tabs,
-        "has_douyin_tab": any("douyin.com" in (tab.get("url") or "") for tab in tabs if isinstance(tab, dict)),
+        "has_douyin_tab": any(_is_douyin_url(tab.get("url")) for tab in tabs if isinstance(tab, dict)),
     }
 
 
@@ -184,8 +188,11 @@ def capture_douyin_cookies(runtime_settings: Settings = settings) -> dict[str, o
 
     LOGGER.info("Using browser tab for cookie capture: %s", tab.get("url"))
     cookies = _read_cookies_from_tab(tab["webSocketDebuggerUrl"])
+    now = time()
     douyin_cookies = [
-        cookie for cookie in cookies if "douyin.com" in cookie.get("domain", "")
+        cookie for cookie in cookies
+        if is_douyin_domain(str(cookie.get("domain") or "")) and cookie.get("value")
+        and (cookie.get("expires", -1) <= 0 or cookie["expires"] > now)
     ]
     if not douyin_cookies:
         raise BrowserCookieError("没有抓到 douyin.com cookies，请确认专用浏览器窗口里已登录抖音。")
@@ -196,8 +203,7 @@ def capture_douyin_cookies(runtime_settings: Settings = settings) -> dict[str, o
 
     target = cookie_storage_path(runtime_settings)
     if has_login_cookie:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_cookies_to_netscape(douyin_cookies), encoding="utf-8")
+        write_normalized_cookie_file(target, _cookies_to_netscape(douyin_cookies).encode("utf-8"))
 
     return {
         "saved": has_login_cookie,
@@ -331,16 +337,21 @@ def _get_tabs(debug_port: int) -> list[dict]:
     raise BrowserCookieError("无法读取专用浏览器标签页：" + "；".join(errors))
 
 
+def _is_douyin_url(value: object) -> bool:
+    try:
+        url = urlsplit(str(value or ""))
+        return url.scheme in {"http", "https"} and is_douyin_domain(url.hostname or "")
+    except ValueError:
+        return False
+
+
 def _pick_douyin_tab(tabs: object) -> dict | None:
     if not isinstance(tabs, list):
         return None
     for tab in tabs:
         if not isinstance(tab, dict):
             continue
-        if "douyin.com" in tab.get("url", "") and tab.get("webSocketDebuggerUrl"):
-            return tab
-    for tab in tabs:
-        if isinstance(tab, dict) and tab.get("webSocketDebuggerUrl"):
+        if _is_douyin_url(tab.get("url")) and tab.get("webSocketDebuggerUrl"):
             return tab
     return None
 
@@ -358,7 +369,7 @@ def _ensure_douyin_tab(debug_port: int) -> dict[str, object]:
 
     tabs = _get_tabs(debug_port)
     douyin_tab = next(
-        (tab for tab in tabs if isinstance(tab, dict) and "douyin.com" in tab.get("url", "")),
+        (tab for tab in tabs if isinstance(tab, dict) and _is_douyin_url(tab.get("url"))),
         None,
     )
 

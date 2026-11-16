@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>账号安全 · VideoInsight Agent</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20261112-qr-mobile2" />
+  <link rel="stylesheet" href="/static/login.css?v=20261113-password" />
+  <link rel="stylesheet" href="/static/account.css?v=20261113-password" />
+</head>
+<body class="account-page">
+  <header class="account-header">
+    <a class="account-brand" href="/">VideoInsight <span>AGENT</span></a>
+    <a class="account-back-link" href="/">返回工作台</a>
+  </header>
+  <main class="account-main">
+    <h1>账号安全</h1>
+    <p id="accountStatus" class="verification-status" role="status" aria-live="polite">正在读取账号...</p>
+    <section id="accountPanel" hidden>
+      <dl class="account-details">
+        <div><dt>账号</dt><dd id="accountUsername"></dd></div>
+        <div><dt>安全邮箱</dt><dd id="accountEmail"></dd></div>
+      </dl>
+      <section id="bindingSection" class="security-section" hidden>
+        <h2>绑定安全邮箱</h2>
+        <form id="bindingForm">
+          <fieldset id="bindingFields" disabled>
+            <div class="login-field"><label for="bindingCurrentPassword">当前密码</label><div class="login-password"><input class="form-input" id="bindingCurrentPassword" type="password" autocomplete="current-password" maxlength="512" required /><button type="button" data-toggle-password="bindingCurrentPassword" aria-label="显示当前密码" aria-pressed="false">显示</button></div></div>
+            <div class="login-field"><label for="bindingEmail">安全邮箱</label><input class="form-input" id="bindingEmail" type="email" autocomplete="email" placeholder="你本人可以接收邮件的邮箱" maxlength="254" required /></div>
+            <div class="login-field"><label for="bindingCode">邮箱验证码</label><div class="verification-row"><input class="form-input" id="bindingCode" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="6 位验证码" required /><button id="sendBindingCode" class="btn btn-secondary" type="button">获取验证码</button></div></div>
+            <p id="bindingCodeStatus" class="verification-status" role="status" aria-live="polite"></p>
+            <p id="bindingError" class="login-error" role="alert" aria-live="polite"></p>
+            <button id="bindingSubmit" class="btn btn-primary security-submit" type="submit">验证并绑定邮箱</button>
+          </fieldset>
+        </form>
+      </section>
+      <section id="changeSection" class="security-section" hidden>
+        <h2>修改密码</h2>
+        <p class="security-note">修改后，所有设备都需要重新登录。</p>
+        <form id="changePasswordForm">
+          <fieldset id="changeFields" disabled>
+            <div class="login-field"><label for="changeCurrentPassword">当前密码</label><div class="login-password"><input class="form-input" id="changeCurrentPassword" type="password" autocomplete="current-password" maxlength="512" required /><button type="button" data-toggle-password="changeCurrentPassword" aria-label="显示当前密码" aria-pressed="false">显示</button></div></div>
+            <div class="login-field"><label for="changeCode">邮箱验证码</label><div class="verification-row"><input class="form-input" id="changeCode" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="6 位验证码" required /><button id="sendChangeCode" class="btn btn-secondary" type="button">获取验证码</button></div></div>
+            <p id="changeCodeStatus" class="verification-status" role="status" aria-live="polite"></p>
+            <div class="login-field"><label for="changeNewPassword">新密码</label><div class="login-password"><input class="form-input" id="changeNewPassword" type="password" autocomplete="new-password" placeholder="至少 10 位，最多 128 位" minlength="10" maxlength="128" required /><button type="button" data-toggle-password="changeNewPassword" aria-label="显示新密码" aria-pressed="false">显示</button></div></div>
+            <div class="login-field"><label for="changeConfirmPassword">确认新密码</label><input class="form-input" id="changeConfirmPassword" type="password" autocomplete="new-password" placeholder="再次输入新密码" minlength="10" maxlength="128" required /></div>
+            <p id="changeError" class="login-error" role="alert" aria-live="polite"></p>
+            <button id="changeSubmit" class="btn btn-primary security-submit" type="submit">验证并修改密码</button>
+          </fieldset>
+        </form>
+      </section>
+      <section id="passwordSuccess" class="security-section" hidden>
+        <h2>密码已更新</h2>
+        <p class="security-note">原有登录已失效。</p>
+        <a class="btn btn-primary security-submit" href="/login">使用新密码登录</a>
+      </section>
+    </section>
+  </main>
+  <script src="/static/auth-common.js?v=20261113-password" defer></script>
+  <script src="/static/account.js?v=20261113-password" defer></script>
+</body>
+</html>

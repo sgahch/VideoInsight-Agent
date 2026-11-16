@@ -1,5 +1,6 @@
 (() => {
   "use strict";
+  const { post, message, clearLegacyToken, codeSender } = AccountAuth;
   const form = document.getElementById("loginForm");
   const password = document.getElementById("password");
   const toggle = document.getElementById("togglePassword");
@@ -13,86 +14,74 @@
   const sendCode = document.getElementById("sendCode");
   const email = document.getElementById("registerEmail");
   const codeStatus = document.getElementById("codeStatus");
-  let cooldownTimer = null;
+  const resetForm = document.getElementById("resetForm");
+  const resetEmail = document.getElementById("resetEmail");
+  const resetError = document.getElementById("resetError");
+  const resetFields = document.getElementById("resetFields");
+  const success = document.getElementById("authSuccess");
   let registrationAvailable = false;
-
-  async function post(path, payload) {
-    const response = await fetch(path, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload), signal: AbortSignal.timeout(20000),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      const failure = new Error(typeof data.detail === "string" ? data.detail : "请检查填写内容后重试。");
-      failure.retryAfter = Number(response.headers.get("Retry-After")) || 0;
-      throw failure;
-    }
-    return data;
-  }
+  let passwordAvailable = false;
+  let mode = location.pathname === "/forgot-password" ? "reset" : location.pathname === "/register" ? "register" : "login";
 
   function completedLogin() {
-    try { localStorage.removeItem("videoinsight_auth_token"); } catch (_) { /* Cookie works without localStorage. */ }
+    clearLegacyToken();
     window.location.replace("/");
   }
 
-  function showForm(register) {
-    register = register && registrationAvailable;
-    form.hidden = register;
+  function showForm(next) {
+    mode = next === "register" && !registrationAvailable ? "login" : next;
+    const register = mode === "register", reset = mode === "reset";
+    form.hidden = mode !== "login";
     registerForm.hidden = !register;
-    loginTab.setAttribute("aria-selected", String(!register));
+    resetForm.hidden = !reset;
+    document.querySelector(".account-tabs").hidden = reset;
+    document.querySelector(".login-session-note").hidden = reset;
+    loginTab.setAttribute("aria-selected", String(mode === "login"));
     registerTab.setAttribute("aria-selected", String(register));
-    loginTab.tabIndex = register ? -1 : 0;
+    loginTab.tabIndex = mode === "login" ? 0 : -1;
     registerTab.tabIndex = register ? 0 : -1;
-    document.getElementById("login-title").textContent = register ? "创建账号" : "欢迎回来";
-    document.getElementById("accountNote").textContent = register ? "验证邮箱，开启你的视频工作台。" : "登录账号，继续探索视频中的价值。";
-    document.title = `${register ? "注册" : "登录"} · VideoInsight Agent`;
-    history.replaceState(null, "", register ? "/register" : "/login");
+    document.getElementById("login-title").textContent = reset ? "重置密码" : register ? "创建账号" : "欢迎回来";
+    document.getElementById("accountNote").textContent = reset ? "验证安全邮箱，设置新的登录密码。" : register ? "验证邮箱，开启你的视频工作台。" : "登录账号，继续探索视频中的价值。";
+    document.title = `${reset ? "重置密码" : register ? "注册" : "登录"} · VideoInsight Agent`;
+    history.replaceState(null, "", reset ? "/forgot-password" : register ? "/register" : "/login");
   }
 
-  loginTab.addEventListener("click", () => showForm(false));
-  registerTab.addEventListener("click", () => showForm(true));
+  loginTab.addEventListener("click", () => { success.textContent = ""; showForm("login"); });
+  registerTab.addEventListener("click", () => { success.textContent = ""; showForm("register"); });
+  document.getElementById("forgotPassword").addEventListener("click", event => {
+    event.preventDefault();
+    success.textContent = "";
+    const username = form.elements.username.value.trim();
+    if (username.includes("@")) resetEmail.value = username;
+    showForm("reset");
+    resetEmail.focus();
+  });
+  document.getElementById("backToLogin").addEventListener("click", event => {
+    event.preventDefault();
+    showForm("login");
+    form.elements.username.focus();
+  });
   for (const tab of [loginTab, registerTab]) {
     tab.addEventListener("keydown", event => {
       if (!registrationAvailable || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
       event.preventDefault();
       const register = tab === loginTab;
-      showForm(register);
+      showForm(register ? "register" : "login");
       (register ? registerTab : loginTab).focus();
     });
   }
 
-  function cooldown(seconds) {
-    window.clearInterval(cooldownTimer);
-    const until = Date.now() + Math.min(86400, Math.max(1, seconds)) * 1000;
-    const update = () => {
-      const remaining = Math.max(0, Math.ceil((until - Date.now()) / 1000));
-      sendCode.disabled = remaining > 0;
-      sendCode.textContent = remaining ? `${remaining} 秒后重发` : "获取验证码";
-      if (!remaining) window.clearInterval(cooldownTimer);
-    };
-    update();
-    cooldownTimer = window.setInterval(update, 1000);
-  }
-
-  sendCode.addEventListener("click", async () => {
-    if (!email.reportValidity()) return;
-    sendCode.disabled = true;
-    sendCode.textContent = "发送中...";
-    registerError.textContent = "";
-    codeStatus.textContent = "";
-    try {
-      const data = await post("/auth/register/code", { email: email.value.trim() });
-      codeStatus.textContent = data.message;
-      cooldown(data.retry_after || 60);
-      document.getElementById("registerCode").focus();
-    } catch (failure) {
-      registerError.textContent = failure.name === "TimeoutError" ? "发送超时，请稍后检查邮箱或重试。" : failure.message || "发送失败，请稍后重试。";
-      if (failure.retryAfter) cooldown(failure.retryAfter);
-      else {
-        sendCode.disabled = false;
-        sendCode.textContent = "获取验证码";
-      }
-    }
+  codeSender({
+    button: sendCode, endpoint: "/auth/register/code", email,
+    validate: () => email.reportValidity(),
+    payload: () => ({ email: email.value.trim() }),
+    status: codeStatus, error: registerError, code: document.getElementById("registerCode"),
+  });
+  codeSender({
+    button: document.getElementById("sendResetCode"), endpoint: "/auth/password/reset/code", email: resetEmail,
+    validate: () => passwordAvailable && resetEmail.reportValidity(),
+    payload: () => ({ email: resetEmail.value.trim() }),
+    status: document.getElementById("resetCodeStatus"), error: resetError, code: document.getElementById("resetCode"),
   });
 
   registerForm.addEventListener("submit", async event => {
@@ -114,10 +103,43 @@
       });
       completedLogin();
     } catch (failure) {
-      registerError.textContent = failure.name === "TimeoutError" ? "连接超时，请稍后尝试登录。" : failure.message || "注册失败，请稍后重试。";
+      registerError.textContent = message(failure);
     } finally {
       registerSubmit.disabled = false;
       registerSubmit.textContent = "注册并登录 →";
+    }
+  });
+  resetForm.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (!passwordAvailable) return;
+    resetError.textContent = "";
+    const nextPassword = document.getElementById("resetPassword");
+    const confirm = document.getElementById("resetConfirmPassword");
+    if (nextPassword.value !== confirm.value) {
+      resetError.textContent = "两次输入的密码不一致。";
+      confirm.focus();
+      return;
+    }
+    const submitReset = document.getElementById("resetSubmit");
+    const loginEmail = resetEmail.value.trim();
+    resetFields.disabled = true;
+    submitReset.textContent = "正在重置...";
+    try {
+      const data = await post("/auth/password/reset", {
+        email: loginEmail, code: document.getElementById("resetCode").value.trim(), password: nextPassword.value,
+      });
+      clearLegacyToken();
+      resetForm.reset();
+      form.elements.username.value = loginEmail;
+      password.value = "";
+      success.textContent = data.message;
+      showForm("login");
+      password.focus();
+    } catch (failure) {
+      resetError.textContent = message(failure);
+    } finally {
+      resetFields.disabled = !passwordAvailable;
+      submitReset.textContent = "重置密码";
     }
   });
   toggle.addEventListener("click", () => {
@@ -136,7 +158,7 @@
       await post("/auth/login", { username: form.elements.username.value.trim(), password: password.value });
       completedLogin();
     } catch (failure) {
-      error.textContent = failure.name === "TimeoutError" ? "连接超时，请稍后重试。" : failure.message || "暂时无法连接服务器。";
+      error.textContent = message(failure);
       password.focus();
     } finally {
       submit.disabled = false;
@@ -147,8 +169,15 @@
     .then(response => response.ok ? response.json() : Promise.reject())
     .then(account => {
       registrationAvailable = account.registration_available === true;
+      passwordAvailable = account.password_reset_available === true;
+      resetFields.disabled = !passwordAvailable;
+      if (!passwordAvailable) resetError.textContent = "邮箱验证暂不可用，请联系管理员。";
       registerTab.hidden = !registrationAvailable;
-      showForm(location.pathname === "/register");
+      showForm(mode);
     })
-    .catch(() => { registerTab.hidden = true; });
+    .catch(() => {
+      registerTab.hidden = true;
+      resetError.textContent = "无法读取账号服务状态，请刷新页面重试。";
+    });
+  if (mode === "reset") showForm(mode);
 })();

@@ -1384,6 +1384,43 @@ a {
   flex-direction: column;
   gap: 10px;
 }
+.cookie-access-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cookie-access-group > .btn {
+  min-height: 44px;
+}
+.cookie-clear-button {
+  min-height: 44px;
+  width: 100%;
+  color: var(--danger);
+  white-space: normal;
+}
+.local-helper-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.local-helper-actions .mini-btn {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  text-decoration: none;
+  white-space: normal;
+}
+#startLocalLogin {
+  min-height: 44px;
+  white-space: normal;
+}
+#localHelperMessage {
+  margin: 0;
+  min-height: 18px;
+  line-height: 1.7;
+}
 .cookie-textarea {
   width: 100%;
   background: var(--bg);
@@ -1440,9 +1477,9 @@ input[type="file"].cookie-textarea {
 .qr-code-stage {
   display: grid;
   place-items: center;
-  flex: 0 0 224px;
-  width: 224px;
-  height: 224px;
+  flex: 0 0 auto;
+  width: min(224px, 100%);
+  aspect-ratio: 1;
   padding: 12px;
   box-sizing: border-box;
   border: 1px solid var(--border);
@@ -1452,9 +1489,11 @@ input[type="file"].cookie-textarea {
   font-size: 13px;
 }
 .qr-image {
-  width: 198px;
-  height: 198px;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
   object-fit: contain;
+  -webkit-touch-callout: default;
 }
 .qr-login-status {
   min-width: 0;
@@ -1463,6 +1502,44 @@ input[type="file"].cookie-textarea {
   font-size: 13px;
   line-height: 1.6;
   margin: 0 0 12px;
+}
+.qr-expiry {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.qr-login-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.qr-login-actions .mini-btn {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 14px;
+  font-size: 13px;
+  text-decoration: none;
+  touch-action: manipulation;
+}
+.qr-login-actions .mini-btn:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 3px;
+}
+.qr-mobile-hint {
+  max-width: 36em;
+  margin: 12px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+@media (min-width: 960px) and (pointer: fine) {
+  .qr-mobile-hint {
+    display: none;
+  }
 }
 @media (max-width: 560px) {
   .qr-login-view {
@@ -1473,6 +1550,16 @@ input[type="file"].cookie-textarea {
   }
   .qr-code-stage {
     flex-basis: auto;
+  }
+  .qr-login-actions {
+    justify-content: center;
+  }
+  .qr-login-status {
+    width: 100%;
+  }
+  #startQrLogin {
+    min-height: 44px;
+    white-space: normal;
   }
 }
 .cookie-message {
@@ -1659,6 +1746,10 @@ html[data-theme="light"] .media-player {
     border-right: none;
     border-bottom: 1px solid var(--border);
     padding: 16px;
+  }
+
+  .sidebar-nav-item {
+    min-height: 44px;
   }
 
   .history-sidebar-section {

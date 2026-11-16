@@ -396,3 +396,369 @@ Runtime packages are recorded at
 The public IP endpoint remains HTTP. Add HTTPS or use an encrypted tunnel
 before transmitting real passwords or platform login credentials over an
 untrusted network. This release does not add TLS.
+
+## QR Mobile Follow-Up
+
+On 2026-11-13, the QR polling and mobile UI update was deployed as
+`videoinsight:5885d77`. This identifier is derived from the three frontend
+file hashes, not a Git commit. The image inherits `videoinsight:cd109bd`
+and replaces only `web/app.js`, `web/index.html`, and `web/styles.css`.
+
+Polling starts immediately, resumes on foreground/online events, and
+retains the current QR session through transient connection failures.
+The UI adds slow-loading feedback, a separate expiry indicator, QR image
+download, mobile album-scanning guidance, 44px action targets, responsive
+QR sizing, and browser zoom support. No backend or schema changes were made.
+
+Production verification generated real 512x512 QR images and checked
+client isolation, no-store responses, cancellation, browser-context release,
+mock task completion, detail view, used marker, test-task cleanup, and the
+private Groq route. Existing platform Cookies and historical task counts
+were unchanged. The public JS/CSS hashes match the local release files;
+registration and unauthenticated access guards still work.
+
+Authenticated browser checks used an encrypted SSH tunnel to the production
+application. Desktop and Android Pixel 10 emulation loaded real QR images
+in 32.449 and 32.932 seconds respectively. Pixel checks confirmed nonblank
+images. Layouts at 1440, 390, and 320 CSS pixels had no horizontal overflow;
+mobile action targets measured 44px. Downloading the real QR PNG succeeded.
+Actual phone approval and real-account automatic save were not performed.
+The remaining platform loading delay is not claimed to be eliminated.
+
+The focused local regression run passed 43 tests with one opt-in transport
+test skipped and one existing dependency warning. The earlier full suite
+passed 504 tests with that transport test skipped; its separate isolated
+browser transport run verified automatic saving with synthetic credentials.
+
+The root-only rollback backup is
+`/opt/videoinsight/backups/20261113-qr-mobile-5885d77-verified`.
+The previous application is retained, stopped with restart disabled, as
+`videoinsight-before-qr-mobile-5885d77-verified`. Environment and Nginx
+configuration match their backups byte-for-byte. All three service
+containers are healthy without OOM events; the QR browser and Groq proxy
+kept their container IDs. Frontend sources and their manifest are retained
+under `/opt/videoinsight/releases/5885d77`.
+
+The public endpoint remains HTTP. This rollout does not add TLS. Use HTTPS
+or an encrypted tunnel for real credentials and platform authorization.
+
+## Email Password Recovery
+
+On 2026-11-14, email-verified password recovery and account security were
+deployed as `videoinsight:c25e231`. This identifier is a source-content hash,
+not a Git commit. The image inherits `videoinsight:5885d77` and replaces four
+authentication modules and nine frontend files; runtime dependencies and
+the existing QR mobile styles are unchanged.
+
+- The login page includes a forgot-password action at `/forgot-password`.
+  Users verify a six-digit email code before setting a new password.
+- Signed-in users open `/account` from the account-security link. Password
+  changes require the current password and a code sent to the account's
+  server-selected email address. Successful reset/change requires login
+  again and invalidates every previous session without changing task
+  ownership.
+- The bootstrap administrator first binds their own recovery email using
+  the current password and an email code. No email is silently inferred
+  from SMTP settings. The real administrator's password and unbound-email
+  state were deliberately preserved during deployment.
+- Reset, change, binding, and registration codes are purpose-separated.
+  Codes are HMAC-digested, single-use, password-version-bound, expire after
+  10 minutes, and allow five incorrect attempts. Durable email/IP/global
+  limits are shared with registration, with a 60-second resend cooldown.
+  Anonymous reset-code responses do not disclose account existence.
+- Two additive SQLite tables retain administrator credentials and pending
+  action codes. Email binding and registration cannot claim the same
+  address concurrently. An explicit bootstrap password-hash rotation in
+  the private environment overrides the administrator's saved password
+  and recovery binding; ordinary restarts retain both.
+
+The full Python regression run passed 529 tests with one opt-in transport
+test skipped and one existing dependency deprecation warning. A subsequent
+focused run passed all 27 recovery tests, including two additional tests
+for concurrent email claims and migration from the legacy user schema.
+JavaScript syntax checks and whitespace checks passed.
+
+An isolated browser fixture exercised registration, password change,
+forgot-password recovery, first administrator binding, session revocation,
+invalid current passwords/codes, and mismatching passwords. Its fixed OTP
+and synthetic credentials were not deployed. Desktop and Android-emulated
+layouts at 1440, 390, and 320 CSS pixels had no horizontal overflow and
+retained at least 44px action targets. Read-only checks of the production
+forgot-password page and authenticated administrator security page passed;
+no real administrator binding or password change was performed.
+
+Production HTTP verification used a temporary synthetic account and
+server-inserted signed test challenges, not real email delivery. It covered
+password change/reset, replay rejection, old-password rejection, cross-device
+session invalidation, stable task ownership, task completion/detail, and
+cleanup. The account, challenges, and task were removed. SMTP certificate
+validation, TLS, and authentication passed without sending an email.
+Actual recovery-code inbox delivery remains unverified.
+
+The original QR authorization flow also passed an authenticated production
+browser regression over an encrypted SSH tunnel. A real nonblank 512x512
+platform QR image loaded in 41.647 seconds in Android Pixel 10 emulation,
+downloaded successfully, and fit 1440, 390, and 320 CSS-pixel layouts with
+44px action targets. The temporary QR session was cancelled. Real phone
+approval and real-account automatic save were not performed.
+
+The root-only rollback backup is
+`/opt/videoinsight/backups/20261114-password-c25e231-verified`.
+The previous application is retained, stopped with restart disabled, as
+`videoinsight-before-password-c25e231-verified`. The private environment,
+container environment, and Nginx configuration match their backups.
+Historical task counts remain five failed and two succeeded; platform
+Cookies are unchanged. Application, private QR browser, and Groq proxy are
+healthy, and the browser/proxy container IDs are unchanged. Sources and
+their manifest are retained under `/opt/videoinsight/releases/c25e231`.
+
+The public endpoint remains HTTP. Use HTTPS or an encrypted tunnel before
+entering real passwords or email codes over an untrusted network. This
+release does not add TLS.
+
+## QR Confirmation Follow-Up
+
+On 2026-11-14, the QR confirmation correction was deployed as
+`videoinsight:eb0e5f0`. This is the SHA-256 prefix of `app/remote_qr.py`, not
+a Git commit. The image inherits `videoinsight:c25e231` and replaces only
+that backend module. Password recovery, frontend assets, runtime packages,
+private settings, and service dependencies are unchanged.
+
+After the account owner reported confirming the phone-side prompt without
+a success indication, investigation reproduced two independent defects in
+an isolated real Chromium context:
+
+- Missing QR nodes caused every poll to click the login opener again,
+  including after a QR had already been displayed. Opening is now limited
+  to one successful attempt per browser connection, including across page
+  document changes.
+- Status text was read only from the QR node's nearby ancestors. Once that
+  node was replaced, scan/confirmation messages became unreadable. Status
+  now comes from the stable platform login component observed in the live
+  page.
+
+The worker preserves scanned/confirming progress rather than reverting to
+the waiting state. It reports confirmation processing and delayed results,
+and distinguishes detected extra verification, rejection, platform errors,
+and server-side saving failures. Only actual login cookies followed by a
+successful private-file save can produce confirmed success. New diagnostic
+logs contain a shortened opaque session ID, categorical state/error type,
+and elapsed time; they do not include cookie values, account names, page
+content, or private browser addresses.
+
+All four new real-browser DOM regressions failed against the original
+implementation and passed after correction. The focused QR/cookie suite
+passed 54 tests. The full suite passed all 542 tests, including the opt-in
+real CDP transport tests, with no skips and one existing dependency warning.
+Synthetic cookies were used only in isolated contexts and temporary files,
+never in the real platform-cookie file.
+
+Production verification covered the new module in a separate process,
+then again after cutover: QR replacement, scanned/confirming progress,
+synthetic-cookie save, context disposal, administrator compatibility,
+password pages, real platform QR generation, mock-task completion/detail,
+and cleanup. Existing platform Cookies retained their original hash;
+historical task counts stayed at five failed and two succeeded.
+
+Authenticated Playwright checks over an encrypted SSH tunnel used Android
+Pixel 10 emulation. A real nonblank 512x512 QR loaded in 33.587 seconds and
+downloaded successfully. Layouts at 1440, 390, and 320 CSS pixels had no
+horizontal overflow and retained 44px action targets. Separate response
+fixtures verified scanned-to-confirming-to-saved feedback, no premature
+success, reconnect/foreground resume, expiry, and cancellation at 320, 390,
+768, and 1440 CSS pixels. These UI fixture responses did not modify real
+server Cookies or authorize a real account.
+
+The first two cutovers rolled back automatically because of verification
+script mistakes: expecting a public forgot-password page instead of the
+normal authenticated redirect, then omitting the client ID required by QR
+start. After correcting and separately passing the complete verification
+script, the third transaction succeeded. The failed candidates and their
+root-only backups remain available for audit.
+
+The successful rollback backup is
+`/opt/videoinsight/backups/20261114-qr-confirm-eb0e5f0-verified3`.
+The prior application is stopped with restart disabled as
+`videoinsight-before-qr-confirm-eb0e5f0-verified3`. No active QR login was
+interrupted by the cutover. The original Nginx configuration and all
+application environment values were restored/preserved. Application, QR
+browser, and Groq proxy are healthy; browser/proxy container IDs are
+unchanged. Sources, tests, and a manifest are retained under
+`/opt/videoinsight/releases/eb0e5f0`.
+
+The account owner's real phone confirmation still requires a fresh-code
+retest. The reproduced code defects are not proof of the exact platform
+response in the earlier attempt, whose response body was not recorded.
+The public endpoint remains HTTP; this correction does not add TLS.
+
+## Shared Authorization Navigation
+
+On 2026-11-14, `videoinsight:153a064` replaced only `web/app.js`,
+`web/index.html`, and `web/styles.css` on top of `videoinsight:eb0e5f0`.
+The identifier is a hash of the three source-file hashes, not a Git commit.
+The QR confirmation and password-recovery backend modules are unchanged.
+
+The missing Cookies navigation was caused by registered-account role
+handling, not a mobile-only CSS rule: the old frontend hid both the link
+and the whole section for non-administrators. All signed-in accounts now
+retain the Cookies and model-settings links. Registered accounts see the
+shared authorization status, an explicit administrator-management notice,
+and a read-only refresh action. Administrator QR/import controls stay
+hidden until the account role is verified. Backend administrator guards
+remain unchanged, and mobile navigation/action targets are at least 44px.
+Asset URLs were versioned to avoid retaining the old hidden-link script.
+
+The focused account/security suite passed all 80 tests, with one existing
+dependency warning. Local browser fixtures covered both account roles in
+remote, desktop, and import-only modes; failed refresh recovery; read-only
+status access; rejected mutation requests; and navigation/layouts at 320,
+390, 768, and 1440 CSS pixels. The QR UI regression also passed, including
+confirmation feedback, download, reconnect, expiry, and cancellation.
+
+Production HTTP checks verified administrator and temporary registered-user
+login, navigation assets, status/model access, and six administrator-only
+guards. Authenticated Android-emulated browser checks exercised both roles
+at the same four widths without horizontal overflow. No real account
+passwords, emails, or roles were changed; temporary test accounts were
+removed. A real nonblank 512x512 QR loaded in 30.186 seconds, downloaded,
+and fit desktop/mobile layouts. Its session was cancelled. Real phone
+approval was not performed.
+
+The successful rollback backup is
+`/opt/videoinsight/backups/20261114-cookie-access-153a064-verified`.
+The previous container is stopped with restart disabled as
+`videoinsight-before-cookie-access-153a064-verified`. The cutover drained
+tasks and checked that no QR login was active before stopping the service.
+Existing platform Cookies, historical task counts, private environment,
+and Nginx configuration were preserved. Source and verification artifacts
+are retained under `/opt/videoinsight/releases/153a064`.
+
+The public endpoint remains HTTP; this frontend correction does not add TLS.
+
+## 2026-11-15: Account-Scoped Douyin Authorization
+
+This supersedes the read-only registered-user behavior of the 2026-11-14
+frontend release. Every registered account can use inline QR login or
+import its own Cookies. Private files live beside the SQLite database in
+`account-cookies/<SHA256-of-server-account-owner>/cookies.txt`, outside the
+media tree, with atomic replacement and mode 0600 (directory 0700).
+Administrator authorization stays in its existing file and is never
+copied to registered users.
+
+Signed account identity controls HTTP operations, QR ownership and storage,
+background download workers, recovered queued tasks, and on-demand source
+video downloads. Client-supplied IDs cannot choose another account.
+Unconfigured or expired user authorization never falls back to the
+administrator file, system browser, or shared desktop browser profile.
+Completed QR results remain readable after the next account starts login.
+The QR browser still admits one active context at a time to bound memory;
+other accounts get an explicit busy response and can retry.
+
+The optional comment-service API and worker also support private Cookies.
+Its authenticated health response must advertise `account_cookies: true`;
+the application fails closed for account authorization or job submission
+against an older service. The production server currently has no separate
+comment service configured, so that service does not need a runtime restart.
+
+Both account roles retain mobile Cookies/settings navigation. Registered
+users see "我的抖音授权 · 仅当前账号使用" and the same QR/import workflow.
+The public endpoint is still HTTP: account separation is not transport
+encryption. Use HTTPS or an SSH tunnel before transmitting real credentials.
+
+### Deployment And Verification
+
+`videoinsight:b95e885` was deployed on 2026-11-15 over
+`videoinsight:153a064`. Its identifier hashes the twelve changed application
+and frontend source files, not a Git commit. No dependency upgrades or
+environment changes were made.
+
+The complete Python suite passed 551 tests with the isolated Chromium CDP
+checks enabled, with one existing dependency deprecation warning.
+Browser fixtures covered QR waiting/confirmation/success, reconnect,
+expiry, cancellation, download, both roles, and 320/390/768/1440px layouts.
+Staging and production checks created two temporary registered accounts,
+verified private imports and mode 0600 files, concurrent recovered worker
+ownership, task and QR access isolation, shared-desktop denial, administrator
+compatibility, and cleanup of test users, tasks, and files.
+
+Authenticated Android-emulated production browser checks passed for both
+roles at all four widths. A normal user's real nonblank 512x512 Douyin QR
+loaded in 73.707 seconds, downloaded, and fit the 320/390/1440px layouts.
+That delay remains a usability limitation. The QR session was cancelled;
+no phone approval or real Douyin login was performed. Synthetic login
+capture and private atomic saving were verified through the real CDP
+transport in a separate offline context.
+
+The rollback backup is
+`/opt/videoinsight/backups/20261115-account-cookies-b95e885-verified`.
+The old container is stopped with restart disabled as
+`videoinsight-before-account-cookies-b95e885-verified`. Existing tasks and
+QR sessions were drained before the switch. Administrator authorization,
+account records, task history, private environment and Nginx configuration
+were retained. Source, tests and manifest are archived under
+`/opt/videoinsight/releases/b95e885`.
+
+## 2026-11-16: Windows Local Login Helper And HTTPS
+
+`videoinsight:0319728` replaces `videoinsight:b95e885`. Its identifier hashes
+eighteen runtime source/binary files, not a Git commit. Ordinary and administrator
+accounts can download the optional Windows x64 helper from Cookies authorization.
+After a one-time current-user protocol installation, the website hands off to a
+fresh local Edge/Chrome login window. The helper shows the destination website
+account before opening Douyin, captures only that window's Douyin Cookies, and
+reports success only after the server confirms a private save.
+
+The server derives storage ownership from the signed website session. One-time
+claim/upload credentials are hashed in SQLite, expire after ten minutes, and
+cannot name a different account. Clearing Cookies, logout, password change,
+expiry, and cancellation revoke a pending helper. Upload retries acknowledge
+the original save without overwriting it. Normal users never reuse the
+administrator's authorization. Mobile devices retain inline QR and import;
+the Windows controls are hidden there. The installer is not Authenticode-signed.
+It requires no administrator elevation, startup task, or daily browser profile.
+
+The IP endpoint now has a certificate-verified HTTPS listener. The certificate is
+stored under `/opt/videoinsight/tls/live/videoinsight-ip`, initially expiring at
+2026-11-22 03:01:34 UTC. Certbot 5.10.0 uses the short-lived IP certificate
+profile, with an every-four-hours renewal schedule in
+`/etc/cron.d/videoinsight-tls`. The deployment hook validates and reloads Nginx.
+The ACME webroot is `/var/lib/videoinsight-acme`; the protected `/opt` parent
+cannot serve the HTTP challenge. HTTP now redirects to HTTPS with status 308,
+except for the challenge location.
+
+`videoinsight-helper-tls.conf` is the default TLS listener because IP clients do
+not send a hostname SNI value. This changes no-SNI default certificate selection.
+The existing `stardevil.cn` SNI certificate was verified unchanged and valid.
+The application's trusted-peer middleware accepts forwarded HTTPS only from the
+configured reverse proxy addresses, enabling Secure session Cookies and
+same-origin checks without trusting arbitrary client headers.
+
+The complete Python suite passed 598 tests, including isolated real Chromium
+transport, with one existing dependency deprecation warning. Four subsequent
+installer tests passed against a fake registry. The frozen helper self-test
+passed. Both account roles passed live HTTPS browser checks at 320, 390, 768,
+and 1440 CSS pixels, including start/cancel without altering saved Cookies and
+mobile fallback. Staging and production checks verified independent private
+files, mode 0600, token claim/replay, cross-account denial, revocation, password
+changes, administrator compatibility, and exact executable hashes.
+
+A real isolated Windows Edge process captured synthetic HttpOnly Cookies, and
+the actual helper HTTPS client saved them to a temporary ordinary cloud account.
+The browser process tree, temporary profile, test account, its private Cookies,
+and exported browser sessions were removed. Real Douyin phone approval was not
+performed. The executable was inspected but not installed on this Windows user.
+
+The previous container is stopped with restart disabled as
+`videoinsight-before-local-helper-0319728-verified`. The protected rollback
+backup is `/opt/videoinsight/backups/20261116-local-helper-0319728-verified`.
+Existing tasks and QR sessions were drained before switching. Application
+environment, administrator authorization, account records, and historical tasks
+were preserved. Main, QR browser, and Groq proxy are healthy. Sources, tests,
+binary, deployment scripts, and hashes are archived under
+`/opt/videoinsight/releases/0319728`.
+
+A full rollback must restore the backed-up HTTP Nginx configuration and disable
+the new TLS listener as well as restoring the old application container. The
+old image does not understand the trusted forwarded HTTPS scheme, so reverting
+only the image would break same-origin authenticated HTTPS requests. TLS renewal
+scheduling must also be reviewed as part of that rollback.

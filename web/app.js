@@ -21,6 +21,7 @@
   const POLL_INTERVAL_MS = 2000;
   const QR_POLL_INTERVAL_MS = 3000;
   const QR_POLL_MAX_ATTEMPTS = 100; // 约 5 分钟
+  const QR_POLL_MAX_ERRORS = 5;
   const DEFAULT_TIMEOUT_MS = 20000;
   const CAPTURE_TIMEOUT_MS = 30000;
 
@@ -139,11 +140,15 @@
 
     // Cookies
     cookieState: $("#cookieState"),
+    clearCookieLogin: $("#clearCookieLogin"),
     sidebarCookieStatus: $("#sidebarCookieStatus"),
     cookieText: $("#cookieText"),
     cookieFile: $("#cookieFile"),
     cookieMessage: $("#cookieMessage"),
     cookieAuthHint: $("#cookieAuthHint"),
+    cookieAdminControls: $("#cookieAdminControls"),
+    cookieReadOnly: $("#cookieReadOnly"),
+    refreshSharedCookies: $("#refreshSharedCookies"),
     cookieImport: $("#cookieImport"),
     cookieImportSummary: $("#cookieImportSummary"),
     cookieTextActions: $("#cookieTextActions"),
@@ -153,6 +158,9 @@
     qrView: $("#qrView"),
     qrStage: $("#qrStage"),
     qrPlaceholder: $("#qrPlaceholder"),
+    qrExpiry: $("#qrExpiry"),
+    saveQrImage: $("#saveQrImage"),
+    qrMobileHint: $("#qrMobileHint"),
     cancelQrLogin: $("#cancelQrLogin"),
     saveCookieText: $("#saveCookieText"),
     verifyCookies: $("#verifyCookies"),
@@ -215,9 +223,13 @@
     qrSessionId: null,
     qrTimer: null,
     qrAttempts: 0,
+    qrFailures: 0,
+    qrPolling: false,
+    qrStartedAt: 0,
     pendingCookieRetry: null,
     cookieAuthorization: null,
-    accountIsAdmin: true,
+    clearingCookies: false,
+    accountIsAdmin: false,
     parsedLink: null, // 最新的 /parse-link 解析结果（含干净 url 与建议标签）
     transcriptText: "",
     summaryText: "", // AI 总结原始 Markdown，供「复制」按钮使用
@@ -881,7 +893,7 @@
     } else if (task.status === "failed") {
       setTaskStatus("failed", task.error || "任务失败。");
       if (!task.result?.output) els.summaryOutput.textContent = task.error || "任务失败。";
-      if (task.request && isCookieFailure(task.error) && state.accountIsAdmin) {
+      if (task.request && isCookieFailure(task.error)) {
         state.pendingCookieRetry = {
           url: String(task.request.url || ""),
           mode: task.request.mode || "summary",
@@ -894,8 +906,6 @@
           "error",
         );
         renderCookieAuthorization(state.cookieAuthorization);
-      } else if (isCookieFailure(task.error) && !state.accountIsAdmin) {
-        setTaskStatus("failed", `${task.error || "平台登录态失效。"} 请联系管理员更新平台授权后重试。`);
       }
     } else if (task.status === "succeeded") {
       setTaskStatus("succeeded", "分析完成。");
@@ -1593,13 +1603,15 @@
     const desktop = capabilities?.mode === "desktop" && capabilities.desktop_available === true;
     const remote = capabilities?.mode === "remote" && capabilities.qr_available === true;
     state.cookieAuthorization = { ...capabilities, mode: remote ? "remote" : desktop ? "desktop" : "import" };
+    els.cookieAdminControls.hidden = false;
+    els.cookieReadOnly.hidden = true;
     els.startQrLogin.hidden = !desktop && !remote;
     els.checkCookieBrowser.hidden = !desktop;
     els.desktopCookieActions.hidden = !desktop;
     els.cookieTextActions.classList.toggle("two", desktop);
     els.cookieTextActions.classList.toggle("single", !desktop);
     els.cookieImportSummary.textContent = desktop || remote ? "手动导入与故障排查" : "导入平台 Cookies";
-    els.cookieAuthHint.textContent = remote ? "抖音账号授权" : desktop
+    els.cookieAuthHint.textContent = !state.accountIsAdmin ? "我的抖音授权 · 仅当前账号使用" : remote ? "管理员抖音授权" : desktop
       ? "本地桌面授权 · 抖音扫码 / 文件导入" : "文件 / 文本导入 · 当前服务无桌面登录窗口";
     els.startQrLogin.textContent = state.pendingCookieRetry
       ? "登录并自动重试该链接" : "登录/刷新抖音 Cookies";
@@ -1613,19 +1625,23 @@
     try {
       const summary = await fetchJson("/cookies/status", {}, 8000);
       renderCookieAuthorization(summary.authorization);
+      window.VideoInsightLocalLogin?.render(summary.local_helper);
       const badge = cookieBadge(summary);
       els.cookieState.className = `badge ${badge.cls}`;
       els.cookieState.textContent = badge.text;
       els.sidebarCookieStatus.className = `badge ${badge.cls}`;
       els.sidebarCookieStatus.textContent = badge.text;
+      els.clearCookieLogin.disabled = state.clearingCookies;
       return summary;
     } catch (error) {
       renderCookieAuthorization(null);
+      window.VideoInsightLocalLogin?.render(null);
       els.cookieAuthHint.textContent = "授权状态检查失败";
       els.cookieState.className = "badge badge-danger";
       els.cookieState.textContent = "检查失败";
       els.sidebarCookieStatus.className = "badge badge-danger";
       els.sidebarCookieStatus.textContent = "检查失败";
+      els.clearCookieLogin.disabled = true;
       return null;
     }
   }
@@ -1643,6 +1659,35 @@
       ? `；缺少：${summary.missing_important.join(", ")}`
       : "";
     return `共 ${summary.count || 0} 条，${loginState}${present}${missing}`;
+  }
+
+  async function clearCookieLogin() {
+    if (state.clearingCookies || !window.confirm("清除当前账号保存的抖音登录态？不会删除历史任务，也不会影响其他账号。")) return;
+    state.clearingCookies = true;
+    const controls = [...els.cookieAdminControls.querySelectorAll("button, input, textarea")];
+    const disabled = controls.map(control => control.disabled);
+    controls.forEach(control => { control.disabled = true; });
+    state.pendingCookieRetry = null;
+    stopQrPolling();
+    setCookieMessage("正在清除本账号的抖音登录态...");
+    try {
+      const result = await fetchJson("/cookies", { method: "DELETE" }, 50000);
+      els.cookieText.value = "";
+      els.cookieFile.value = "";
+      els.qrImage.removeAttribute("src");
+      els.qrView.hidden = true;
+      window.VideoInsightLocalLogin?.cleared();
+      await refreshCookieStatus();
+      setCookieMessage(result.comments_cleared
+        ? "本账号的抖音登录态已清除，历史任务已保留。"
+        : "视频授权已清除；评论授权同步暂时失败，请稍后再次清除。", result.comments_cleared ? "ok" : "error");
+    } catch (error) {
+      setCookieMessage(`清除失败：${error.message}`, "error");
+    } finally {
+      state.clearingCookies = false;
+      controls.forEach((control, index) => { control.disabled = disabled[index]; });
+      els.clearCookieLogin.disabled = false;
+    }
   }
 
   /** 保存粘贴的 Cookie 文本或 JSON。 */
@@ -1687,30 +1732,58 @@
   }
 
   function stopQrPolling() {
-    window.clearInterval(state.qrTimer);
+    window.clearTimeout(state.qrTimer);
     state.qrTimer = null;
     state.qrSessionId = null;
     state.qrAttempts = 0;
+    state.qrFailures = 0;
     els.cancelQrLogin.hidden = true;
+    els.saveQrImage.hidden = true;
+    els.saveQrImage.removeAttribute("href");
+    els.qrMobileHint.hidden = true;
+    els.qrExpiry.hidden = true;
+    els.qrStage.setAttribute("aria-busy", "false");
     els.startQrLogin.textContent = state.pendingCookieRetry
       ? "登录并自动重试该链接" : "登录/刷新抖音 Cookies";
   }
 
+  function scheduleQrPoll() {
+    window.clearTimeout(state.qrTimer);
+    if (state.qrSessionId) {
+      state.qrTimer = window.setTimeout(pollQrLogin, QR_POLL_INTERVAL_MS);
+    }
+  }
+
+  function resumeQrLogin() {
+    if (document.visibilityState === "visible" && state.qrSessionId) {
+      window.clearTimeout(state.qrTimer);
+      state.qrFailures = 0;
+      void pollQrLogin();
+    }
+  }
+
   function setQrMessage(message) {
     els.qrView.hidden = false;
-    els.qrMessage.textContent = message;
+    if (els.qrMessage.textContent !== message) els.qrMessage.textContent = message;
   }
 
   function renderQrSession(session) {
-    setQrMessage(session.message || "等待扫码确认...");
+    const slow = session.status === "starting" && Date.now() - state.qrStartedAt > 15000;
+    setQrMessage(slow ? "抖音页面响应较慢，正在继续加载；无需反复刷新。" : session.message || "等待扫码确认...");
     const imageUrl = session.qr_image_url;
     if (imageUrl && imageUrl !== els.qrImage.getAttribute("src")) {
       els.qrImage.src = imageUrl;
     }
     els.qrImage.hidden = !imageUrl;
     els.qrPlaceholder.hidden = !!imageUrl;
+    els.qrStage.setAttribute("aria-busy", String(session.status === "starting"));
+    els.saveQrImage.hidden = !imageUrl;
+    els.qrMobileHint.hidden = !imageUrl;
+    if (imageUrl) els.saveQrImage.href = imageUrl;
+    else els.saveQrImage.removeAttribute("href");
+    els.qrExpiry.hidden = session.expires_in == null || session.completed;
     if (session.expires_in != null && !session.completed) {
-      els.qrMessage.textContent += `（剩余 ${session.expires_in} 秒）`;
+      els.qrExpiry.textContent = `本次登录会话剩余 ${session.expires_in} 秒`;
     }
   }
 
@@ -1737,6 +1810,7 @@
     const remote = state.cookieAuthorization.mode === "remote";
     els.startQrLogin.disabled = true;
     try {
+      await window.VideoInsightLocalLogin?.cancel();
       if (state.qrSessionId) await cancelQrLogin();
     } catch (error) {
       setQrMessage(`取消旧会话失败：${error.message}`);
@@ -1744,6 +1818,7 @@
       return;
     }
     stopQrPolling();
+    state.qrStartedAt = Date.now();
     els.qrStage.hidden = !remote;
     els.qrImage.hidden = true;
     els.qrImage.removeAttribute("src");
@@ -1758,7 +1833,7 @@
       renderQrSession(session);
       els.cancelQrLogin.hidden = !remote;
       els.startQrLogin.textContent = remote ? "刷新二维码" : "重新打开登录窗口";
-      state.qrTimer = window.setInterval(pollQrLogin, QR_POLL_INTERVAL_MS);
+      await pollQrLogin();
     } catch (error) {
       els.qrPlaceholder.textContent = "二维码未生成";
       setQrMessage(`启动失败：${error.message}`);
@@ -1784,6 +1859,7 @@
     try {
       const status = await fetchJson(`/cookies/qr/${sessionId}/status`, {}, 10000);
       if (state.qrSessionId !== sessionId) return;
+      state.qrFailures = 0;
       if (status.completed) {
         stopQrPolling();
         els.qrImage.hidden = true;
@@ -1800,17 +1876,25 @@
         stopQrPolling();
         els.qrPlaceholder.textContent = status.status === "expired" ? "二维码已过期" : "二维码不可用";
         els.qrImage.removeAttribute("src");
+        els.startQrLogin.textContent = status.status === "expired" ? "刷新二维码" : "重新生成二维码";
       }
     } catch (error) {
       if (state.qrSessionId !== sessionId) return;
+      state.qrFailures += 1;
+      if (![400, 401, 403, 404].includes(error.status) && state.qrFailures <= QR_POLL_MAX_ERRORS) {
+        setQrMessage(`连接暂时中断，正在自动重连（${state.qrFailures}/${QR_POLL_MAX_ERRORS}）；原登录会话仍保留。`);
+        return;
+      }
       stopQrPolling();
       els.qrImage.hidden = true;
       els.qrImage.removeAttribute("src");
       els.qrPlaceholder.hidden = false;
       els.qrPlaceholder.textContent = "连接中断";
       setQrMessage(`检测失败：${error.message}`);
+      els.startQrLogin.textContent = "重新连接扫码登录";
     } finally {
       state.qrPolling = false;
+      scheduleQrPoll();
     }
   }
 
@@ -2443,16 +2527,14 @@
       els.serviceState.textContent = `服务正常 · 默认 ${health.mock_mode ? "Mock" : "真实"} 模式 · ${cookieState}`;
 
       accountLoginEnabled = Boolean(health.login_required);
+      state.accountIsAdmin = !accountLoginEnabled;
       document.getElementById("accountLogout").hidden = !accountLoginEnabled;
+      document.getElementById("accountSecurity").hidden = !accountLoginEnabled;
       if (accountLoginEnabled) {
         const account = await fetchJson("/auth/me");
         if (!account.authenticated) window.location.replace("/login");
-        state.accountIsAdmin = account.is_admin !== false;
+        state.accountIsAdmin = account.authenticated === true && account.is_admin === true;
         document.getElementById("accountLogout").title = account.username || "退出登录";
-        if (account.authenticated && account.is_admin === false) {
-          document.getElementById("cookies").hidden = true;
-          document.querySelectorAll('a[href="#cookies"]').forEach(link => { link.hidden = true; });
-        }
       }
       if (health.auth_required && !accountLoginEnabled) {
         els.authSection.hidden = false;
@@ -2565,6 +2647,17 @@
     els.refreshHistory.addEventListener("click", loadHistory);
 
     els.saveCookieText.addEventListener("click", saveCookieText);
+    els.clearCookieLogin.addEventListener("click", clearCookieLogin);
+    els.refreshSharedCookies.addEventListener("click", async () => {
+      els.refreshSharedCookies.disabled = true;
+      setCookieMessage("正在刷新授权状态...");
+      try {
+        const data = await refreshCookieStatus();
+        setCookieMessage(data ? `${describeCookieSummary(data)}。` : "刷新失败，请稍后重试。", data ? "" : "error");
+      } finally {
+        els.refreshSharedCookies.disabled = false;
+      }
+    });
     els.verifyCookies.addEventListener("click", async () => {
       setCookieMessage("正在检查已保存的 Cookies...");
       const data = await refreshCookieStatus();
@@ -2576,7 +2669,28 @@
     });
     els.uploadCookieFile.addEventListener("click", uploadCookieFile);
     els.startQrLogin.addEventListener("click", startQrLogin);
+    window.addEventListener("videoinsight:helper-saved", async () => {
+      stopQrPolling();
+      els.qrView.hidden = true;
+      setCookieMessage("抖音登录成功，Cookies 已保存到当前账号。", "ok");
+      await refreshCookieStatus();
+      await retryPendingCookieTask();
+    });
+    window.addEventListener("videoinsight:helper-starting", () => {
+      if (state.qrSessionId) void cancelQrLogin().catch(() => {});
+    });
     els.cancelQrLogin.addEventListener("click", () => cancelQrLogin().catch(error => setQrMessage(`取消失败：${error.message}`)));
+    els.qrImage.addEventListener("error", () => {
+      if (!els.qrImage.getAttribute("src")) return;
+      els.qrImage.hidden = true;
+      els.qrPlaceholder.hidden = false;
+      els.qrPlaceholder.textContent = "二维码图片加载失败";
+      els.saveQrImage.hidden = true;
+      setQrMessage("二维码未能显示，请点击刷新二维码重试。");
+    });
+    document.addEventListener("visibilitychange", resumeQrLogin);
+    window.addEventListener("pageshow", resumeQrLogin);
+    window.addEventListener("online", resumeQrLogin);
     els.openCookieBrowser.addEventListener("click", openCookieBrowser);
     els.checkCookieBrowser.addEventListener("click", checkCookieBrowser);
     els.captureCookieBrowser.addEventListener("click", captureCookieBrowser);

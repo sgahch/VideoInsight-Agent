@@ -8,6 +8,7 @@ import sys
 from crawler_service.pagination import Pager
 from crawler_service.runtime import browser_options, runtime_status, state_dir as runtime_state_dir, upstream_dir
 from crawler_service.store import Store
+from crawler_service.cookie_storage import cookie_path
 
 
 async def run(job_id: str):
@@ -17,11 +18,11 @@ async def run(job_id: str):
     if not job:
         return
     platform = job["platform"]
-    cookie_path = state_dir / "cookies" / f"{platform}.txt"
-    if not cookie_path.exists() or not cookie_path.read_text(encoding="utf-8").strip():
+    authorization = cookie_path(state_dir, platform, job["owner"])
+    if not authorization.exists() or not authorization.read_text(encoding="utf-8").strip():
         store.status(job_id, "needs_login", "请先在评论中心导入该平台的登录 Cookies，再点击继续。")
         return
-    cookies = cookie_path.read_text(encoding="utf-8").strip()
+    cookies = authorization.read_text(encoding="utf-8").strip()
     pager = Pager(store, job_id, platform)
     crawler = None
     original_dir = os.getcwd()

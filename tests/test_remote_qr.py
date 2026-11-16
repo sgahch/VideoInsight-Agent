@@ -93,6 +93,36 @@ def test_inline_qr_owner_isolation_and_single_active_context(login):
         assert missing.value.status_code == 404
 
 
+def test_qr_thread_saves_private_file_and_retains_completed_result(login, tmp_path):
+    from app.account_auth import task_account_scope
+    from app.adapters.downloader import cookie_storage_path
+
+    manager, browser, config = login
+    config = replace(config, db_path=tmp_path / "data/tasks.db")
+    owner_a, owner_b = "account:" + "a" * 32, "account:" + "b" * 32
+    config.ytdlp_cookies_file.write_text("admin-file-must-not-change", encoding="utf-8")
+    with task_account_scope(owner_a):
+        path_a = cookie_storage_path(config)
+        session_a = manager.start(config, owner_a)["session_id"]
+    browser.confirmed.set()
+    manager.current.thread.join(3)
+    assert manager.status(session_a, owner_a)["completed"]
+    assert summarize_cookie_file(path_a)["has_login_cookie"]
+    assert config.ytdlp_cookies_file.read_text() == "admin-file-must-not-change"
+    browser.confirmed.clear()
+    with task_account_scope(owner_b):
+        path_b = cookie_storage_path(config)
+        session_b = manager.start(config, owner_b)["session_id"]
+    assert not path_b.exists()
+    assert manager.status(session_a, owner_a)["completed"]
+    for action in (manager.status, manager.cancel):
+        with pytest.raises(remote_qr.RemoteQRLoginError) as error:
+            action(session_a, owner_b)
+        assert error.value.status_code == 404
+    manager.cancel(session_b, owner_b)
+    assert not path_b.exists()
+
+
 def test_cancel_releases_context_without_replacing_existing_cookies(login):
     manager, browser, config = login
     config.ytdlp_cookies_file.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
@@ -126,6 +156,61 @@ def test_scanned_waits_for_actual_login_cookie(login):
     session = manager.start(config, "owner")["session_id"]
     result = wait_for(manager, session, {"scanned"})
     assert not result["completed"] and not config.ytdlp_cookies_file.exists()
+
+
+def test_disappearing_qr_waits_for_login_cookies_without_reporting_success(login):
+    manager, browser, config = login
+    session = manager.start(config, "owner")["session_id"]
+    wait_for(manager, session, {"waiting"})
+    browser.page = {}
+    result = wait_for(manager, session, {"confirming"})
+    assert not result["completed"] and not config.ytdlp_cookies_file.exists()
+    assert "核验" in result["message"] and manager.current.thread.is_alive()
+    browser.confirmed.set()
+    result = wait_for(manager, session, {"confirmed"})
+    assert result["completed"] and summarize_cookie_file(config.ytdlp_cookies_file)["has_login_cookie"]
+
+
+def test_scanned_state_is_not_downgraded_when_platform_text_changes(login):
+    manager, browser, config = login
+    browser.page["scanned"] = True
+    session = manager.start(config, "owner")["session_id"]
+    wait_for(manager, session, {"scanned"})
+    browser.page = {"image": IMAGE}
+    time.sleep(0.05)
+    result = manager.status(session, "owner")
+    assert result["status"] == "scanned" and not result["completed"]
+    assert not config.ytdlp_cookies_file.exists()
+
+
+@pytest.mark.parametrize("flag,fragment", [
+    ("verification", "安全验证"), ("rejected", "已取消"), ("login_error", "未能完成"),
+])
+def test_platform_authorization_failure_is_explicit_and_preserves_existing_cookies(login, flag, fragment):
+    manager, browser, config = login
+    config.ytdlp_cookies_file.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    before = config.ytdlp_cookies_file.read_bytes()
+    browser.page = {"image": IMAGE, flag: True}
+    session = manager.start(config, "owner")["session_id"]
+    result = wait_for(manager, session, {"failed"})
+    manager.current.thread.join(2)
+    assert fragment in result["message"] and not result["completed"] and browser.closed
+    assert config.ytdlp_cookies_file.read_bytes() == before
+
+
+def test_cookie_save_failure_is_not_reported_as_login_success(login, monkeypatch):
+    manager, browser, config = login
+
+    def fail(*args):
+        raise PermissionError("private-path-and-cookie-must-not-leak")
+
+    monkeypatch.setattr(remote_qr, "save_douyin_login_cookies", fail)
+    browser.confirmed.set()
+    session = manager.start(config, "owner")["session_id"]
+    result = wait_for(manager, session, {"failed"})
+    assert "保存失败" in result["message"] and not result["completed"]
+    assert "private-path" not in str(result)
+    assert not config.ytdlp_cookies_file.exists()
 
 
 def test_non_login_cookies_are_not_saved_as_success(login):

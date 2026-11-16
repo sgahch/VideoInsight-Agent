@@ -27,7 +27,7 @@ def test_web_app() -> None:
 def test_upload_cookies(monkeypatch, tmp_path) -> None:
     client = TestClient(app)
     cookie_file = tmp_path / "cookies.txt"
-    monkeypatch.setattr(main_module, "default_cookies_file", lambda _: cookie_file)
+    monkeypatch.setattr(main_module, "cookie_storage_path", lambda _: cookie_file)
 
     response = client.post(
         "/cookies",
@@ -64,7 +64,7 @@ def test_import_authorization_can_save_and_report_cookies(monkeypatch, tmp_path)
 
     target = tmp_path / "cookies.txt"
     monkeypatch.setattr(main_module, "settings", replace(main_module.settings, cookie_login_mode="import"))
-    monkeypatch.setattr(main_module, "default_cookies_file", lambda _: target)
+    monkeypatch.setattr(main_module, "cookie_storage_path", lambda _: target)
     client = TestClient(app)
     response = client.post(
         "/cookies", files={"file": ("cookies.txt", b"sessionid=example-session", "text/plain")},

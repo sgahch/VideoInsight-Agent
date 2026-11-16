@@ -27,6 +27,7 @@ from typing import Protocol, runtime_checkable
 
 from app.adapters.downloader import normalize_url
 from app.config import Settings
+from app.media_urls import media_hostname, media_platform
 from app.schemas import CommentItem
 
 
@@ -55,22 +56,20 @@ _ID_PATTERNS = {
 
 def detect_platform_cn(url: str) -> str:
     """与 workflow.detect_platform 保持一致的平台识别（避免循环导入，本地实现）。"""
-    value = url.strip().lower()
-    if value.startswith("upload://"):
+    if url.strip().lower().startswith("upload://"):
         return "上传文件"
-    if any(host in value for host in ("kuaishou.com", "chenzhongtech.com", "gifshow.com")):
-        return "快手"
-    if "douyin.com" in value:
-        return "抖音"
-    if "bilibili.com" in value or "b23.tv" in value:
-        return "B站"
-    if "xiaohongshu.com" in value or "xhslink" in value:
-        return "小红书"
-    if "weibo.com" in value or "weibo.cn" in value:
+    platform = {
+        "douyin": "抖音", "kuaishou": "快手", "bilibili": "B站",
+        "xiaohongshu": "小红书", "youtube": "YouTube",
+    }.get(media_platform(url))
+    if platform:
+        return platform
+    host = media_hostname(url)
+    if host in {"weibo.com", "www.weibo.com", "m.weibo.cn", "weibo.cn"}:
         return "微博"
-    if "tieba.baidu.com" in value:
+    if host == "tieba.baidu.com":
         return "百度贴吧"
-    if "zhihu.com" in value:
+    if host in {"zhihu.com", "www.zhihu.com", "zhuanlan.zhihu.com"}:
         return "知乎"
     return "未知平台"
 

@@ -35,6 +35,10 @@ def registration_available(config: Settings) -> bool:
     return bool(config.registration_enabled and config.auth_password_hash and config.smtp_username and config.smtp_password)
 
 
+def password_email_available(config: Settings) -> bool:
+    return bool(config.auth_password_hash and config.smtp_username and config.smtp_password)
+
+
 def registration_digest(config: Settings, value: str) -> str:
     return hmac.new(config.auth_session_secret.encode(), value.encode(), hashlib.sha256).hexdigest()
 
@@ -45,16 +49,31 @@ def smtp_tls_context() -> ssl.SSLContext:
 
 
 def send_verification_email(config: Settings, recipient: str, code: str) -> None:
+    _send_email(
+        config, recipient, "VideoInsight 邮箱注册验证码",
+        f"你的 VideoInsight 注册验证码是：{code}\n\n"
+        "验证码 10 分钟内有效，仅能使用一次。请勿向任何人透露。\n"
+        "如果不是你本人发起的注册，请忽略此邮件。\n",
+    )
+
+
+def send_password_email(config: Settings, recipient: str, code: str, purpose: str) -> None:
+    action = {"reset": "重置密码", "change": "修改密码", "bind": "绑定安全邮箱"}[purpose]
+    _send_email(
+        config, recipient, f"VideoInsight {action}验证码",
+        f"你正在{action}，验证码是：{code}\n\n"
+        "验证码 10 分钟内有效，仅限本次操作且只能使用一次。请勿向任何人透露。\n"
+        "如果不是你本人操作，请忽略此邮件，你的密码不会因此改变。\n",
+    )
+
+
+def _send_email(config: Settings, recipient: str, subject: str, content: str) -> None:
     sender = normalize_email(config.smtp_username or "")
     message = EmailMessage()
     message["From"] = Address("VideoInsight", addr_spec=sender)
     message["To"] = Address(addr_spec=recipient)
-    message["Subject"] = "VideoInsight 邮箱注册验证码"
-    message.set_content(
-        f"你的 VideoInsight 注册验证码是：{code}\n\n"
-        "验证码 10 分钟内有效，仅能使用一次。请勿向任何人透露。\n"
-        "如果不是你本人发起的注册，请忽略此邮件。\n"
-    )
+    message["Subject"] = subject
+    message.set_content(content)
     with smtplib.SMTP_SSL(config.smtp_host, config.smtp_port, timeout=12, context=smtp_tls_context()) as client:
         client.login(config.smtp_username, config.smtp_password)
         client.send_message(message)

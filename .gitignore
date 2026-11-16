@@ -26,6 +26,7 @@ media/
 .serena/
 .playwright-cli/
 output/
+web/downloads/*.exe
 # Private Groq proxy runtime artifacts
 deploy/groq-proxy/mihomo
 deploy/groq-proxy/mihomo*.gz

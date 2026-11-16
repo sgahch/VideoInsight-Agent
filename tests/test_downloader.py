@@ -13,7 +13,12 @@ from app.adapters.downloader import _needs_fresh_cookies, _run_yt_dlp_with_cooki
 from app.errors import WorkflowError
 
 
-def test_normalize_markdown_link() -> None:
+def test_normalize_markdown_link(monkeypatch) -> None:
+    import httpx
+
+    monkeypatch.setattr(downloader_module.httpx, "get", lambda *args, **kwargs: httpx.Response(
+        302, headers={"location": "https://www.douyin.com/video/1234567890"},
+    ))
     assert (
         normalize_url("[https://v.douyin.com/Ep5d4W3NEIU/](https://v.douyin.com/Ep5d4W3NEIU/)")
     ).startswith("https://www.douyin.com/video/")

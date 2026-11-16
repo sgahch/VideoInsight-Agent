@@ -5,7 +5,10 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
+from app.account_auth import account_owner
 from app.errors import WorkflowError
+from app.media_urls import canonical_media_url
+from app.url_safety import PublicOnlyTransport, UnsafeURL
 
 
 _VIDEO_HOSTS = {"bilibili.com", "www.bilibili.com", "m.bilibili.com"}
@@ -137,8 +140,11 @@ def _formats(play_info: dict) -> list[dict]:
 def resolve_bilibili_info(url: str, cookie_args: list[str]) -> dict:
     """通过详情和播放接口生成 yt-dlp 输入，避免请求易被 412 拦截的视频 HTML。"""
     try:
+        if account_owner():
+            url = canonical_media_url(url, resolve_short=True)
         with httpx.Client(
             headers=_HEADERS, cookies=_cookie_jar(cookie_args), timeout=20, trust_env=False,
+            **({"transport": PublicOnlyTransport()} if account_owner() else {}),
         ) as client:
             # 短链只取 Location，不跟随到视频 HTML；限制重定向次数及目标平台。
             for _ in range(5):
@@ -182,6 +188,8 @@ def resolve_bilibili_info(url: str, cookie_args: list[str]) -> dict:
         raise WorkflowError(f"B 站接口请求失败（HTTP {exc.response.status_code}），请稍后重试。") from exc
     except httpx.HTTPError as exc:
         raise WorkflowError("无法连接 B 站接口，请检查网络后重试。") from exc
+    except UnsafeURL as exc:
+        raise WorkflowError(f"B 站链接无法安全解析：{exc}") from exc
     except ValueError as exc:
         raise WorkflowError("B 站接口未返回有效 JSON，请稍后重试。") from exc
 

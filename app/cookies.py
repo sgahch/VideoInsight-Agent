@@ -108,7 +108,17 @@ def summarize_cookie_text(text: str) -> dict[str, object]:
         for line in text.splitlines()
         if line.strip() and (not line.startswith("#") or line.startswith("#HttpOnly_")) and "\t" in line
     ]
-    names = {row[5] for row in rows if len(row) >= 7}
+    names = set()
+    now = time()
+    for row in rows:
+        if len(row) < 7 or not is_douyin_domain(row[0]) or not row[6]:
+            continue
+        try:
+            expires = int(row[4] or "0")
+        except ValueError:
+            continue
+        if expires == 0 or expires > now:
+            names.add(row[5])
     present = sorted(name for name in IMPORTANT_DOUYIN_COOKIES if name in names)
     missing = sorted(name for name in IMPORTANT_DOUYIN_COOKIES if name not in names)
     return {
@@ -158,9 +168,42 @@ def _cookie_expires(cookie: dict, default: int) -> int:
 
 
 def write_normalized_cookie_file(target: Path, raw: bytes, domain: str = DEFAULT_COOKIE_DOMAIN) -> Path:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(normalize_cookie_upload(raw, domain), encoding="utf-8")
+    text = normalize_cookie_upload(raw, domain)
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=".import-cookies-", dir=target.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, target)
+        cookie_logout_path(target).unlink(missing_ok=True)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
     return target
+
+
+def cookie_logout_path(target: Path) -> Path:
+    return target.with_name(target.name + ".signed-out")
+
+
+def clear_douyin_login_cookies(target: Path) -> int:
+    jar = MozillaCookieJar()
+    if target.is_file() and target.stat().st_size:
+        jar.load(str(target), ignore_discard=True, ignore_expires=True)
+    removed = 0
+    for cookie in list(jar):
+        if is_douyin_domain(cookie.domain):
+            jar.clear(cookie.domain, cookie.path, cookie.name)
+            removed += 1
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cookie_logout_path(target).touch(mode=0o600)
+    if removed and len(jar):
+        _save_cookie_jar(jar, target)
+    elif not len(jar):
+        target.unlink(missing_ok=True)
+    return removed
 
 
 def save_douyin_login_cookies(target: Path, cookies: list[dict]) -> None:
@@ -184,7 +227,12 @@ def save_douyin_login_cookies(target: Path, cookies: list[dict]) -> None:
             comment=None, comment_url=None,
             rest={"HTTPOnly": ""} if item.get("httpOnly") else {}, rfc2109=False,
         ))
-    target.parent.mkdir(parents=True, exist_ok=True)
+    _save_cookie_jar(jar, target)
+    cookie_logout_path(target).unlink(missing_ok=True)
+
+
+def _save_cookie_jar(jar: MozillaCookieJar, target: Path) -> None:
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=".qr-cookies-", dir=target.parent)
     os.close(descriptor)
     try:

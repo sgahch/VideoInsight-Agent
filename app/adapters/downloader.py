@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
@@ -18,8 +20,11 @@ import httpx
 from app.adapters.audio import resolve_ffmpeg
 from app.adapters.bilibili import is_bilibili_video_url, resolve_bilibili_info
 from app.config import Settings, settings
-from app.cookies import is_douyin_domain
+from app.account_auth import account_owner
+from app.cookies import cookie_logout_path, is_douyin_domain
 from app.errors import ExternalDependencyError, WorkflowError
+from app.media_urls import canonical_media_url, media_hostname, media_platform
+from app.url_safety import PublicOnlyTransport, UnsafeURL
 
 
 LOGGER = logging.getLogger(__name__)
@@ -27,6 +32,32 @@ DOWNLOAD_RETRY_COUNT = 3
 # yt-dlp 单次尝试的超时上限（重试由 _run_yt_dlp_with_cookie_recovery 负责，
 # 但超时不重试：4 次 × 30 分钟会把一个线程池工人占满两小时）。
 DOWNLOAD_TIMEOUT_SECONDS = 1800
+
+
+def _media_get(url: str, **kwargs) -> httpx.Response:
+    if not account_owner():
+        return httpx.get(url, **kwargs)
+    kwargs.pop("trust_env", None)
+    try:
+        with httpx.Client(transport=PublicOnlyTransport(), trust_env=False) as client:
+            return client.get(url, **kwargs)
+    except UnsafeURL as exc:
+        raise WorkflowError("已阻止访问非公网视频地址。") from exc
+
+
+@contextmanager
+def _media_stream(method: str, url: str, **kwargs):
+    if not account_owner():
+        with httpx.stream(method, url, **kwargs) as response:
+            yield response
+        return
+    kwargs.pop("trust_env", None)
+    try:
+        with httpx.Client(transport=PublicOnlyTransport(), trust_env=False) as client:
+            with client.stream(method, url, **kwargs) as response:
+                yield response
+    except UnsafeURL as exc:
+        raise WorkflowError("已阻止访问非公网视频地址。") from exc
 
 
 @dataclass(frozen=True)
@@ -99,7 +130,7 @@ class YtDlpDownloader:
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
             LOGGER.warning("yt-dlp audio download failed: %s", detail)
-            cookies_configured = bool(cookies_file or settings.ytdlp_cookies_from_browser)
+            cookies_configured = bool(cookies_file or (browser_cookie_fallback_allowed() and settings.ytdlp_cookies_from_browser))
             raise WorkflowError(
                 f"视频下载失败：{friendly_download_error(detail, cookies_configured=cookies_configured)}"
             )
@@ -155,7 +186,7 @@ class YtDlpDownloader:
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
             LOGGER.warning("yt-dlp video download failed: %s", detail)
-            cookies_configured = bool(cookies_file or settings.ytdlp_cookies_from_browser)
+            cookies_configured = bool(cookies_file or (browser_cookie_fallback_allowed() and settings.ytdlp_cookies_from_browser))
             raise WorkflowError(
                 f"源视频下载失败：{friendly_download_error(detail, cookies_configured=cookies_configured)}"
             )
@@ -167,6 +198,11 @@ class YtDlpDownloader:
 
     @staticmethod
     def _input_args(url: str, task_dir: Path, cookies_file: Path | None) -> list[str]:
+        if account_owner():
+            try:
+                url = canonical_media_url(url, resolve_short=True)
+            except (UnsafeURL, httpx.HTTPError) as exc:
+                raise WorkflowError(f"视频链接无法安全解析：{exc}") from exc
         if not is_bilibili_video_url(url):
             return [url]
         info = resolve_bilibili_info(url, _cookie_args(cookies_file, task_dir))
@@ -238,10 +274,19 @@ class KuaishouDownloader:
 
     def _resolve_photo_id(self, url: str) -> str:
         value = url.strip()
+        if account_owner():
+            try:
+                value = canonical_media_url(value, resolve_short=True)
+            except (UnsafeURL, httpx.HTTPError) as exc:
+                raise WorkflowError(f"快手链接无法安全解析：{exc}") from exc
+            match = re.fullmatch(r"https://www\.kuaishou\.com/short-video/([A-Za-z0-9]{1,64})", value)
+            if match:
+                return match[1]
+            raise WorkflowError("无法从快手分享链接解析作品编号，请确认链接有效。")
         if re.fullmatch(r"[0-9A-Za-z]{10,}", value):
             return value
         try:
-            response = httpx.get(
+            response = _media_get(
                 value,
                 follow_redirects=True,
                 timeout=20,
@@ -257,7 +302,7 @@ class KuaishouDownloader:
 
     def _extract_media(self, photo_id: str) -> tuple[str, str | None, str | None]:
         try:
-            page = httpx.get(
+            page = _media_get(
                 f"https://v.m.chenzhongtech.com/fw/photo/{photo_id}",
                 timeout=25,
                 headers={"User-Agent": self.MOBILE_UA},
@@ -298,7 +343,7 @@ class KuaishouDownloader:
 
     def _download_mp4(self, url: str, target: Path) -> None:
         try:
-            with httpx.stream(
+            with _media_stream(
                 "GET",
                 url,
                 timeout=120,
@@ -315,8 +360,7 @@ class KuaishouDownloader:
 
 
 def is_kuaishou_url(url: str) -> bool:
-    value = url.strip().lower()
-    return any(host in value for host in ("kuaishou.com", "chenzhongtech.com", "gifshow.com"))
+    return media_platform(url) == "kuaishou"
 
 
 class DouyinShareDownloader:
@@ -412,7 +456,7 @@ class DouyinShareDownloader:
         last_issue = ""
         for attempt in range(self._SHARE_FETCH_ATTEMPTS):
             try:
-                response = httpx.get(
+                response = _media_get(
                     self.SHARE_PAGE_URL.format(video_id=video_id),
                     headers={
                         "User-Agent": self.MOBILE_UA,
@@ -564,7 +608,7 @@ class DouyinShareDownloader:
         )
 
     def _download_candidate(self, url: str, target: Path) -> None:
-        with httpx.stream(
+        with _media_stream(
             "GET",
             url,
             timeout=180,
@@ -581,13 +625,17 @@ class DouyinShareDownloader:
 
 
 def is_douyin_url(url: str) -> bool:
-    value = url.strip().lower()
-    return any(host in value for host in ("douyin.com", "iesdouyin.com", "snssdk.com"))
+    return media_platform(url) == "douyin"
 
 
 def select_downloader(
     url: str, tmp_dir: Path, use_mock: bool
 ) -> MockDownloader | YtDlpDownloader | KuaishouDownloader | DouyinShareDownloader:
+    if account_owner():
+        try:
+            canonical_media_url(url)
+        except UnsafeURL as exc:
+            raise WorkflowError(str(exc)) from exc
     if use_mock:
         return MockDownloader(tmp_dir)
     if is_douyin_url(url):
@@ -612,7 +660,12 @@ def normalize_url(value: str) -> str:
     markdown_link = re.fullmatch(r"\[[^\]]+\]\((https?://[^)]+)\)", value)
     if markdown_link:
         value = markdown_link.group(1)
-    if "v.douyin.com" in value:
+    if account_owner():
+        try:
+            return canonical_media_url(value, resolve_short=True)
+        except (UnsafeURL, httpx.HTTPError) as exc:
+            raise WorkflowError(f"视频链接无法安全解析：{exc}") from exc
+    if media_hostname(value) == "v.douyin.com":
         value = resolve_douyin_short_url(value)
     return canonicalize_douyin_url(value)
 
@@ -624,7 +677,7 @@ def canonicalize_douyin_url(value: str) -> str:
     /note/<id>（图文笔记或改版分享页），会退化成 generic 并报
     "Unsupported URL"。这里统一改写为 /video/<id>，让 extractor 接管。
     """
-    if "douyin.com" not in value.lower():
+    if not is_douyin_url(value):
         return value
     for pattern in _DOUYIN_ITEM_PATTERNS:
         match = pattern.search(value)
@@ -634,6 +687,11 @@ def canonicalize_douyin_url(value: str) -> str:
 
 
 def resolve_douyin_short_url(url: str) -> str:
+    if account_owner():
+        try:
+            return canonical_media_url(url, resolve_short=True)
+        except (UnsafeURL, httpx.HTTPError) as exc:
+            raise WorkflowError(f"抖音链接无法安全解析：{exc}") from exc
     try:
         response = httpx.get(url, follow_redirects=False, timeout=10, trust_env=False)
     except httpx.HTTPError:
@@ -651,11 +709,18 @@ def default_cookies_file(runtime_settings: Settings = settings) -> Path:
 
 def cookie_storage_path(runtime_settings: Settings = settings) -> Path:
     """Return the cookie file used by both the UI and the downloader."""
+    owner = account_owner()
+    if owner:
+        key = hashlib.sha256(owner.encode()).hexdigest()
+        return runtime_settings.db_path.parent / "account-cookies" / key / "cookies.txt"
     return runtime_settings.ytdlp_cookies_file or default_cookies_file(runtime_settings)
 
 
 def resolve_cookies_file(runtime_settings: Settings = settings) -> Path | None:
-    if runtime_settings.ytdlp_cookies_file:
+    path = cookie_storage_path(runtime_settings)
+    if cookie_logout_path(path).exists() and not path.exists():
+        return None
+    if not account_owner() and runtime_settings.ytdlp_cookies_file:
         if not runtime_settings.ytdlp_cookies_file.exists():
             raise ExternalDependencyError(f"YTDLP_COOKIES_FILE 指向的文件不存在：{runtime_settings.ytdlp_cookies_file}")
         return runtime_settings.ytdlp_cookies_file
@@ -664,6 +729,11 @@ def resolve_cookies_file(runtime_settings: Settings = settings) -> Path | None:
     if is_usable_cookies_file(project_cookies):
         return project_cookies
     return None
+
+
+def browser_cookie_fallback_allowed(runtime_settings: Settings | None = None) -> bool:
+    config = runtime_settings or settings
+    return not account_owner() and not cookie_logout_path(cookie_storage_path(config)).exists()
 
 
 def is_usable_cookies_file(path: Path) -> bool:
@@ -738,7 +808,7 @@ def _cookie_args(cookies_file: Path | None, task_dir: Path) -> list[str]:
         except OSError:
             LOGGER.warning("暂存 cookies 失败，回退使用原始文件：%s", cookies_file)
             return ["--cookies", str(cookies_file)]
-    if settings.ytdlp_cookies_from_browser:
+    if browser_cookie_fallback_allowed() and settings.ytdlp_cookies_from_browser:
         return ["--cookies-from-browser", settings.ytdlp_cookies_from_browser]
     return []
 
@@ -781,7 +851,7 @@ def _needs_fresh_cookies(completed: subprocess.CompletedProcess[str]) -> bool:
 
 
 def _refresh_project_cookies_from_browser() -> bool:
-    if settings.ytdlp_cookies_file is not None:
+    if not browser_cookie_fallback_allowed() or settings.ytdlp_cookies_file is not None:
         return False
     try:
         from app.browser_cookies import capture_douyin_cookies, cookie_browser_status

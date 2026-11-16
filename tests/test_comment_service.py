@@ -81,6 +81,28 @@ def test_worker_without_cookies_returns_actionable_status(service,monkeypatch):
     assert module.store.job(job["id"])["status"]=="needs_login"
 
 
+def test_account_cookie_storage_and_worker_never_fall_back_to_administrator(service):
+    import asyncio
+    from crawler_service.cookie_storage import cookie_path
+    from crawler_service.worker import run
+
+    client, module, _ = service
+    a, b = "account:" + "a" * 32, "account:" + "b" * 32
+    assert client.get("/health").json()["account_cookies"] is True
+    assert client.put("/platforms/dy/cookies", json={"content": "sessionid=admin"}).status_code == 200
+    assert not client.get("/platforms", params={"owner": a}).json()[0]["cookies_configured"]
+    assert client.put("/platforms/dy/cookies", params={"owner": a},
+                      json={"content": "sessionid=alice"}).status_code == 200
+    assert cookie_path(module.STATE, "dy", a).read_text() == "sessionid=alice"
+    assert not client.get("/platforms", params={"owner": b}).json()[0]["cookies_configured"]
+    job = module.store.create(b, "https://www.douyin.com/video/1234567890")
+    asyncio.run(run(job["id"]))
+    assert module.store.job(job["id"])["status"] == "needs_login"
+    client.delete("/platforms/dy/cookies", params={"owner": b}).raise_for_status()
+    assert cookie_path(module.STATE, "dy", a).exists()
+    assert cookie_path(module.STATE, "dy").read_text() == "sessionid=admin"
+
+
 def test_browser_import_is_owned_validated_and_not_scheduled(service):
     from tests.test_browser_capture import complete_capture
     client,module,pending=service

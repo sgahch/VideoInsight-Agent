@@ -14,6 +14,7 @@ from app.adapters.downloader import select_downloader
 from app.adapters.llm import MockLlmAnalyzer, OpenAICompatibleAnalyzer
 from app.config import Settings, settings
 from app.errors import VideoInsightError
+from app.media_urls import media_platform
 from app.prompts import render_comments_block
 from app.schemas import AnalysisMode, AnalysisResult, AnalyzeRequest, CommentItem, MediaInfo
 from app.progress import ProgressReporter, drop_tracker, invalidate_calibration
@@ -26,18 +27,12 @@ _INCLUDE_TIMESTAMPS_IN_PROMPT = False
 
 
 def detect_platform(url: str) -> str:
-    value = url.strip().lower()
-    if value.startswith("upload://"):
+    if url.strip().lower().startswith("upload://"):
         return "上传文件"
-    if any(host in value for host in ("kuaishou.com", "chenzhongtech.com", "gifshow.com")):
-        return "快手"
-    if "douyin.com" in value:
-        return "抖音"
-    if "bilibili.com" in value or "b23.tv" in value:
-        return "B站"
-    if "xiaohongshu.com" in value or "xhslink" in value:
-        return "小红书"
-    return "未知平台"
+    return {
+        "douyin": "抖音", "kuaishou": "快手", "bilibili": "B站",
+        "xiaohongshu": "小红书", "youtube": "YouTube",
+    }.get(media_platform(url), "未知平台")
 
 
 def format_duration(seconds: float | None) -> str:

@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 import app.account_auth as accounts
 import app.comments_api as comments
 import app.main as main
+import app.media_urls as media_urls
 import app.registration as registration
 import app.security as security
 from app.account_store import MAX_CODE_ATTEMPTS, SQLiteAccountStore
@@ -24,6 +25,7 @@ PASSWORD = "registration-test-password"
 
 @pytest.fixture
 def setup(monkeypatch, tmp_path):
+    monkeypatch.setattr(media_urls, "validate_public_url", lambda url, **kwargs: url)
     config = Settings(
         auth_token=None, auth_username="owner",
         auth_password_hash=accounts.hash_password("admin-test-password"),
@@ -191,7 +193,7 @@ def test_weak_password_and_invalid_code_formats_are_rejected(setup):
 def test_account_bound_tasks_ignore_body_header_and_cookie_ids(setup):
     alice, sent, _ = setup
     signup(alice, sent)
-    task = alice.post("/analyze", json={"url": "https://example.com/video", "client_id": "victim-browser"}, headers={"X-Client-ID": "another-browser"}).json()
+    task = alice.post("/analyze", json={"url": "https://www.douyin.com/video/123", "client_id": "victim-browser"}, headers={"X-Client-ID": "another-browser"}).json()
     task_id = task["task_id"]
     stored = main.task_store.get(task_id)
     assert stored.request.client_id.startswith("account:")
@@ -226,16 +228,92 @@ def test_legacy_admin_history_is_preserved_and_reserved_owner_cannot_be_spoofed(
     assert client.get("/tasks", headers={"X-Client-ID": "account:" + "a" * 32}).status_code == 403
 
 
-def test_registered_users_cannot_change_shared_platform_cookies(setup):
+def test_registered_users_can_save_only_their_own_platform_cookies(setup):
+    from app.adapters.downloader import cookie_storage_path
+    from app.cookies import write_normalized_cookie_file
+
+    client, sent, config = setup
+    administrator = cookie_storage_path(config)
+    write_normalized_cookie_file(administrator, b"sessionid=admin-secret; ttwid=admin")
+    original = administrator.read_bytes()
+    signup(client, sent)
+    assert client.get("/cookies/status").json()["count"] == 0
+    saved = client.post("/cookies", files={"file": ("cookies.txt", b"sessionid=alice-secret")})
+    assert saved.status_code == 200
+    alice_path = saved.json()["path"]
+    assert client.get("/cookies/status").json()["has_login_cookie"]
+    assert client.get("/cookies/status").json()["scope"] == "account"
+    assert "no-store" in client.get("/cookies/status").headers["cache-control"]
+    assert client.post("/cookies", files={"file": ("large.txt", b"x" * (256 * 1024 + 1))}).status_code == 413
+    bob = TestClient(main.app)
+    signup(bob, sent, "bob@example.com")
+    assert bob.get("/cookies/status", headers={"X-Client-ID": "account:" + "a" * 32}).json()["count"] == 0
+    saved_bob = bob.post("/cookies", files={"file": ("cookies.txt", b"sessionid=bob-secret; ttwid=bob")})
+    assert saved_bob.status_code == 200
+    assert saved_bob.json()["path"] != alice_path
+    assert client.get("/cookies/status").json()["count"] == 1
+    assert bob.get("/cookies/status").json()["count"] == 2
+    assert client.get("/cookies/qr/unknown/status").status_code == 404
+    for method, path in [("POST", "/cookies/browser/start"), ("GET", "/cookies/browser/status"),
+                         ("POST", "/cookies/browser/capture")]:
+        assert client.request(method, path).status_code == 403
+    assert administrator.read_bytes() == original
+    client.post("/auth/logout")
+    assert client.get("/cookies/status").status_code == 401
+    client.post("/auth/login", json={"username": "owner", "password": "admin-test-password"})
+    assert client.get("/cookies/status").json()["count"] == 2
+    assert administrator.read_bytes() == original
+
+
+def test_account_cookie_proxy_fails_closed_for_old_services_and_ignores_forged_owner(setup, monkeypatch):
     client, sent, _ = setup
     signup(client, sent)
-    for method, path in [
-        ("POST", "/cookies"), ("POST", "/cookies/qr/start"),
-        ("GET", "/cookies/qr/unknown/status"), ("POST", "/cookies/browser/start"),
-        ("PUT", "/comment-api/platforms/bili/cookies"), ("DELETE", "/comment-api/platforms/bili/cookies"),
-    ]:
-        assert client.request(method, path).status_code == 403
-    assert client.get("/cookies/status").status_code == 200
+    calls = []
+    isolated = False
+
+    def service(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return {"account_cookies": isolated} if path == "/health" else {"saved": True}
+
+    monkeypatch.setattr(comments, "service_request", service)
+    response = client.put("/comment-api/platforms/dy/cookies", json={"content": "sessionid=alice"})
+    assert response.status_code == 503
+    assert len(calls) == 1
+    isolated = True
+    assert client.put("/comment-api/platforms/dy/cookies?owner=forged",
+                      json={"content": "sessionid=alice"}).status_code == 200
+    assert calls[-1][2]["params"]["owner"].startswith("account:")
+    assert calls[-1][2]["params"]["owner"] != "forged"
+
+
+def test_on_demand_source_video_uses_authenticated_accounts_cookie(setup, monkeypatch):
+    import app.adapters.downloader as downloader
+    from app.schemas import AnalysisMode, AnalysisResult, MediaInfo
+
+    client, sent, config = setup
+    monkeypatch.setattr(downloader, "settings", config)
+    signup(client, sent)
+    client.post("/cookies", files={"file": ("cookies.txt", b"sessionid=alice-private")}).raise_for_status()
+    task_id = client.post("/analyze", json={"url": "https://www.douyin.com/video/123"}).json()["task_id"]
+    audio = config.media_dir / "audio.mp3"
+    audio.write_bytes(b"synthetic-audio")
+    main.task_store.set_succeeded(task_id, AnalysisResult(
+        mode=AnalysisMode.transcript, transcript="t", output="t",
+        media=MediaInfo(audio_path=str(audio), source_url="https://www.douyin.com/video/123"),
+    ))
+    video = config.media_dir / "source.mp4"
+
+    class Download:
+        def download_video(self, url, task_id):
+            value = downloader.DouyinShareDownloader(config.tmp_dir)._douyin_cookie_header()
+            video.write_bytes(value.encode())
+            return video
+
+    monkeypatch.setattr(main, "select_downloader", lambda *args, **kwargs: Download())
+    assert client.get(f"/tasks/{task_id}/video").content == b"sessionid=alice-private"
+    bob = TestClient(main.app)
+    signup(bob, sent, "bob@example.com")
+    assert bob.get(f"/tasks/{task_id}/video", headers={"X-Client-ID": main.task_store.get(task_id).request.client_id}).status_code == 404
 
 
 def test_comment_owner_is_also_account_bound(setup, monkeypatch):

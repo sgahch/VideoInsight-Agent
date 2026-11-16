@@ -35,5 +35,13 @@
 .login-card { min-width: 0; }
 .login-field input { min-width: 0; }
 .login-card-note, .login-error { overflow-wrap: anywhere; }
+.login-card fieldset, .account-page fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.login-recovery { display: flex; justify-content: flex-end; margin-top: 8px; }
+.login-recovery a, .account-back-link { display: inline-flex; align-items: center; min-height: 44px; color: var(--text-muted); font-size: 13px; text-decoration: none; }
+.login-recovery a:hover, .account-back-link:hover { color: var(--accent); }
+.login-recovery a:focus-visible, .account-back-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.account-back-link { margin-top: 16px; }
+.login-password button { min-width: 44px; min-height: 44px; right: 6px; }
+.login-error { line-height: 1.7; }
 @media (max-width: 360px) { .verification-row { grid-template-columns: minmax(0, 1fr) 116px; gap: 6px; } }
 @media (max-width: 800px) { .login-page { padding: 28px 20px; } .login-shell { max-width: 440px; grid-template-columns: 1fr; gap: 32px; } .login-intro { min-height: auto; gap: 32px; } .login-story h1 { font-size: 30px; } .login-eyebrow, .login-description, .login-features, .login-footnote { display: none; } .login-card { padding: 30px 25px; } }

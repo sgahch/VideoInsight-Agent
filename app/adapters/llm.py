@@ -4,16 +4,19 @@ import json
 import re
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
+from app.account_auth import account_owner
 from app.config import Settings
 from app.errors import ExternalDependencyError, WorkflowError
 from app.prompts import build_chat_prompt, build_prompt
 from app.schemas import AnalysisMode
 from app.streaming import iter_events
+from app.url_safety import PublicOnlyTransport, UnsafeURL, validate_public_url
 
 SYSTEM_PROMPT = (
     "你是严谨的视频内容分析助手。严格遵守用户下发的任务规则与输出格式，"
@@ -90,6 +93,32 @@ def _snippet(text: str, limit: int = 160) -> str:
 
 class _RetryableEndpointError(Exception):
     """端点层面不可用（404/405 或返回非 JSON），可换候选地址重试。"""
+
+
+class _SecretRedactor:
+    def __init__(self, secrets: tuple[str, ...]) -> None:
+        self.secrets = secrets
+        self.pending = ""
+
+    def redact(self, text: str) -> str:
+        for secret in self.secrets:
+            text = text.replace(secret, "[REDACTED]")
+        return text
+
+    def feed(self, text: str) -> str:
+        text = self.redact(self.pending + text)
+        held = 0
+        for secret in self.secrets:
+            for length in range(min(len(secret) - 1, len(text)), held, -1):
+                if text.endswith(secret[:length]):
+                    held = length
+                    break
+        self.pending = text[-held:] if held else ""
+        return text[:-held] if held else text
+
+    def finish(self) -> str:
+        text, self.pending = self.redact(self.pending), ""
+        return text
 
 
 class MockLlmAnalyzer:
@@ -190,7 +219,40 @@ class OpenAICompatibleAnalyzer:
         self._model_override = model
         self._api_key_override = api_key
         self._protocol_override = protocol
+        self._public_url_required = bool(base_url and account_owner())
         self.last_endpoint: str | None = None  # 最近一次成功请求的完整 URL（供自检回显）
+
+    def _candidates(self) -> list[str]:
+        base = self._base_url()
+        if self._public_url_required:
+            try:
+                base = validate_public_url(base)
+            except UnsafeURL as exc:
+                raise WorkflowError(
+                    "自定义模型地址必须是可解析的公网 HTTP(S) 地址，不能包含账号密码、查询参数或片段。"
+                ) from exc
+        return candidate_base_urls(base)
+
+    def _redactor(self, api_key: str) -> _SecretRedactor:
+        secrets = {api_key, self.settings.deepseek_api_key, self.settings.openai_api_key}
+        return _SecretRedactor(tuple(sorted((value for value in secrets if value), key=len, reverse=True)))
+
+    @contextmanager
+    def _stream_response(self, url: str, api_key: str, payload: dict[str, Any]):
+        if self._public_url_required:
+            with httpx.Client(
+                transport=PublicOnlyTransport(), trust_env=False, follow_redirects=False,
+            ) as client:
+                with client.stream(
+                    "POST", url, headers=self._build_headers(api_key), json=payload, timeout=120,
+                ) as response:
+                    yield response
+        else:
+            with httpx.stream(
+                "POST", url, headers=self._build_headers(api_key), json=payload, timeout=120,
+                follow_redirects=False,
+            ) as response:
+                yield response
 
     def analyze(
         self,
@@ -238,7 +300,7 @@ class OpenAICompatibleAnalyzer:
 
     def _complete_stream(self, prompt: str) -> Iterator[str]:
         api_key = self._api_key_override or self._api_key()
-        candidates = candidate_base_urls(self._base_url())
+        candidates = self._candidates()
         if not candidates:
             raise WorkflowError("未配置 API Base URL，请填写类似 https://api.example.com/v1 的地址。")
         for index, base in enumerate(candidates):
@@ -252,14 +314,13 @@ class OpenAICompatibleAnalyzer:
     def _request_stream(self, url: str, api_key: str, prompt: str) -> Iterator[str]:
         payload = self._build_payload(prompt, None)
         payload["stream"] = True
+        redactor = self._redactor(api_key)
         try:
-            with httpx.stream(
-                "POST", url, headers=self._build_headers(api_key), json=payload, timeout=120,
-            ) as response:
+            with self._stream_response(url, api_key, payload) as response:
                 if response.status_code in (404, 405):
                     raise _RetryableEndpointError()
-                if response.is_error:
-                    raise WorkflowError(self._http_error_message(response))
+                if response.is_error or response.is_redirect:
+                    raise WorkflowError(redactor.redact(self._http_error_message(response)))
                 self.last_endpoint = url
                 if "text/event-stream" not in response.headers.get("content-type", ""):
                     # Some compatible gateways accept stream=true but still return JSON.
@@ -276,7 +337,7 @@ class OpenAICompatibleAnalyzer:
                         raise WorkflowError("LLM 返回内容格式异常，请检查接口协议。") from exc
                     if not text.strip():
                         raise WorkflowError("LLM 返回了空内容，请稍后重试。")
-                    yield text
+                    yield redactor.redact(text)
                     return
 
                 finished = False
@@ -315,13 +376,20 @@ class OpenAICompatibleAnalyzer:
                                 finished = True
                     if isinstance(text, str) and text:
                         has_text = True
-                        yield text
+                        safe_text = redactor.feed(text)
+                        if safe_text:
+                            yield safe_text
                     if finished:
                         break
                 if not finished:
                     raise WorkflowError("LLM 连接意外中断，已保留生成的部分内容。")
                 if not has_text:
                     raise WorkflowError("LLM 返回了空内容，请稍后重试。")
+                remaining = redactor.finish()
+                if remaining:
+                    yield remaining
+        except UnsafeURL as exc:
+            raise WorkflowError("自定义模型地址未通过公网安全校验，请检查地址与 DNS 配置。") from exc
         except httpx.HTTPError as exc:
             raise WorkflowError("LLM 服务连接中断，请检查网络后重试；已生成的内容会保留。") from exc
 
@@ -330,7 +398,7 @@ class OpenAICompatibleAnalyzer:
         for_probe: bool = False,
     ) -> str:
         api_key = self._api_key_override or self._api_key()
-        candidates = candidate_base_urls(self._base_url())
+        candidates = self._candidates()
         if not candidates:
             raise WorkflowError("未配置 API Base URL，请填写类似 https://api.example.com/v1 的地址。")
 
@@ -361,22 +429,34 @@ class OpenAICompatibleAnalyzer:
         for_probe: bool = False,
     ) -> str:
         payload = self._build_payload(prompt, max_tokens, for_probe=for_probe)
+        redactor = self._redactor(api_key)
         try:
-            response = httpx.post(
-                url,
-                headers=self._build_headers(api_key),
-                json=payload,
-                timeout=timeout,
-            )
+            if self._public_url_required:
+                with httpx.Client(
+                    transport=PublicOnlyTransport(), trust_env=False, follow_redirects=False,
+                ) as client:
+                    response = client.post(
+                        url, headers=self._build_headers(api_key), json=payload, timeout=timeout,
+                    )
+            else:
+                response = httpx.post(
+                    url,
+                    headers=self._build_headers(api_key),
+                    json=payload,
+                    timeout=timeout,
+                    follow_redirects=False,
+                )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
             if status_code in (404, 405):
                 raise _RetryableEndpointError(
-                    f"接口端点不存在（HTTP {status_code}）：{url}。"
+                    f"接口端点不存在（HTTP {status_code}）：{redactor.redact(url)}。"
                     "请确认 API Base URL 是否缺少 /v1 前缀。"
                 ) from exc
-            raise WorkflowError(self._http_error_message(exc.response)) from exc
+            raise WorkflowError(redactor.redact(self._http_error_message(exc.response))) from exc
+        except UnsafeURL as exc:
+            raise WorkflowError("自定义模型地址未通过公网安全校验，请检查地址与 DNS 配置。") from exc
         except httpx.HTTPError as exc:
             raise WorkflowError("LLM 服务连接失败，请检查网络、API Base URL 后重试。") from exc
 
@@ -385,24 +465,25 @@ class OpenAICompatibleAnalyzer:
         except ValueError as exc:
             raise _RetryableEndpointError(
                 "LLM 返回了无法解析的响应（不是 JSON，几乎都是 API Base URL 填错："
-                f"缺少 /v1 前缀，或填成了官网/控制台地址）。响应开头：{_snippet(response.text)}"
+                f"缺少 /v1 前缀，或填成了官网/控制台地址）。响应开头：{_snippet(redactor.redact(response.text))}"
             ) from exc
         if not isinstance(data, dict):
             raise _RetryableEndpointError(
-                f"LLM 返回了非对象响应：{_snippet(response.text)}"
-            ) from exc
+                f"LLM 返回了非对象响应：{_snippet(redactor.redact(response.text))}"
+            )
         if data.get("error"):
             # 部分网关用 200 携带错误体
             err = data["error"]
             message = err.get("message") if isinstance(err, dict) else str(err)
-            raise WorkflowError(f"LLM 接口返回错误：{message}")
+            raise WorkflowError(f"LLM 接口返回错误：{redactor.redact(str(message))}")
 
         self.last_endpoint = url
         try:
-            return self._extract_text(data)
+            return redactor.redact(self._extract_text(data))
         except (KeyError, IndexError, TypeError) as exc:
             raise WorkflowError(
-                f"LLM 返回内容格式异常（协议 {self._protocol()}）：{json.dumps(data, ensure_ascii=False)[:300]}"
+                f"LLM 返回内容格式异常（协议 {self._protocol()}）："
+                f"{redactor.redact(json.dumps(data, ensure_ascii=False))[:300]}"
             ) from exc
 
     # ---- 协议相关构造 ----
@@ -517,14 +598,15 @@ class OpenAICompatibleAnalyzer:
         if not text.strip():
             raise WorkflowError("LLM 返回了空内容，连接测试未通过，请检查模型与接口协议后重试。")
         elapsed_ms = round((time.perf_counter() - started) * 1000)
+        redactor = self._redactor(self._api_key_override or "")
         return {
             "ok": True,
             "protocol": self._protocol(),
             "protocol_label": PROTOCOL_LABELS.get(self._protocol(), self._protocol()),
-            "endpoint": self.last_endpoint or "",
-            "model": self._model(),
+            "endpoint": redactor.redact(self.last_endpoint or ""),
+            "model": redactor.redact(self._model()),
             "latency_ms": elapsed_ms,
-            "sample": text.strip()[:80],
+            "sample": redactor.redact(text.strip())[:80],
         }
 
     def _http_error_message(self, response: httpx.Response) -> str:

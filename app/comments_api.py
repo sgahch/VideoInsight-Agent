@@ -11,6 +11,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import Settings, settings
+from app.account_auth import account_owner, task_account_scope
+from app.media_urls import canonical_media_url
+from app.url_safety import UnsafeURL
 
 CommentSort = Literal["collected", "likes", "newest"]
 CommentScope = Literal["all", "roots", "replies"]
@@ -38,7 +41,42 @@ def service_request(method: str, path: str, *, config: Settings | None = None, *
         raise HTTPException(503, "评论服务暂时不可用，请稍后重试。")
 
 
+def private_service_params(config: Settings | None = None) -> dict:
+    if not account_owner():
+        return {}
+    health = service_request("GET", "/health", config=config)
+    if health.get("account_cookies") is not True:
+        raise HTTPException(503, "评论服务尚未启用账号独立授权，已阻止使用共享 Cookies，请联系管理员升级。")
+    return {"params": {"owner": account_owner()}}
+
+
+def prepare_account_cookies(config: Settings) -> None:
+    params = private_service_params(config)
+    from app.adapters.downloader import cookie_storage_path
+    from app.cookies import cookie_logout_path
+
+    if cookie_logout_path(cookie_storage_path(config)).exists():
+        service_request("DELETE", "/platforms/dy/cookies", config=config, **params)
+        return
+    if not params:
+        return
+    from app.adapters.downloader import resolve_cookies_file
+    from app.cookies import summarize_cookie_file
+
+    path = resolve_cookies_file(config)
+    if path and summarize_cookie_file(path)["has_login_cookie"]:
+        service_request("PUT", "/platforms/dy/cookies", config=config,
+                        json={"content": path.read_text(encoding="utf-8")}, **params)
+
+
 def start_for_analysis(url: str, client_id: str | None, config: Settings):
+    with task_account_scope(client_id):
+        if account_owner():
+            try:
+                url = canonical_media_url(url, resolve_short=True)
+            except (UnsafeURL, httpx.HTTPError) as exc:
+                raise HTTPException(400, f"评论链接无法安全解析：{exc}") from exc
+        prepare_account_cookies(config)
     return service_request("POST", "/jobs", config=config, json={"url": url, "owner": client_id or ""})
 
 
@@ -60,7 +98,7 @@ def comments_page():
 
 @router.get("/comment-api/platforms")
 def platforms():
-    return service_request("GET", "/platforms")
+    return service_request("GET", "/platforms", **private_service_params())
 
 
 @router.get("/comment-api/health")
@@ -76,14 +114,14 @@ class CookieInput(BaseModel):
 def cookies(platform: str, payload: CookieInput):
     if platform not in {"dy", "ks", "bili", "xhs"}:
         raise HTTPException(404)
-    return service_request("PUT", f"/platforms/{platform}/cookies", json=payload.model_dump())
+    return service_request("PUT", f"/platforms/{platform}/cookies", json=payload.model_dump(), **private_service_params())
 
 
 @router.delete("/comment-api/platforms/{platform}/cookies")
 def delete_cookies(platform: str):
     if platform not in {"dy", "ks", "bili", "xhs"}:
         raise HTTPException(404)
-    return service_request("DELETE", f"/platforms/{platform}/cookies")
+    return service_request("DELETE", f"/platforms/{platform}/cookies", **private_service_params())
 
 
 class NewJob(BaseModel):
@@ -106,7 +144,7 @@ def new_job(payload: NewJob, request: Request):
     parsed = parse_share_text(payload.url)
     if not parsed.url:
         raise HTTPException(400, parsed.note)
-    return service_request("POST", "/jobs", json={"url": parsed.url, "owner": owner(request)})
+    return start_for_analysis(parsed.url, owner(request), settings)
 
 
 @router.get("/comment-api/jobs")
@@ -129,6 +167,18 @@ def job(job_id: str, request: Request):
 def action(job_id: str, action: str, request: Request):
     if action not in {"retry", "cancel"}:
         raise HTTPException(404)
+    if action == "retry":
+        if account_owner():
+            existing = service_request(
+                "GET", f"/jobs/{checked_id(job_id)}", params={"owner": owner(request)},
+            )
+            try:
+                safe_url = canonical_media_url(existing.get("url", ""), resolve_short=True)
+            except (UnsafeURL, httpx.HTTPError) as exc:
+                raise HTTPException(400, f"评论链接无法安全解析：{exc}") from exc
+            if safe_url != existing.get("url"):
+                raise HTTPException(400, "旧评论任务的链接需要更新，请使用作品的官方完整链接重新创建任务。")
+        prepare_account_cookies(settings)
     return service_request("POST", f"/jobs/{checked_id(job_id)}/{action}", params={"owner": owner(request)})
 
 

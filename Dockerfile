@@ -4,8 +4,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
 RUN groupadd --gid 10001 videoinsight \
     && useradd --uid 10001 --gid videoinsight --no-create-home videoinsight
-COPY requirements.txt requirements-asr.txt ./
-RUN pip install -r requirements-asr.txt
+COPY requirements.txt requirements-asr.txt constraints-security.txt ./
+RUN python -m pip install --upgrade "pip>=26.2" \
+    && python -m pip install -r requirements-asr.txt
 RUN python -c "import imageio_ffmpeg, os; os.symlink(imageio_ffmpeg.get_ffmpeg_exe(), '/usr/local/bin/ffmpeg')"
 COPY app ./app
 COPY web ./web

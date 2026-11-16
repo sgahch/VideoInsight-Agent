@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Tests](https://img.shields.io/badge/tests-178%20passed-2EA44F?style=flat-square&logo=pytest&logoColor=white)](./tests)
+[![Tests](https://img.shields.io/badge/tests-776%20passed-2EA44F?style=flat-square&logo=pytest&logoColor=white)](./tests)
 [![ASR](https://img.shields.io/badge/ASR-DashScope%20Paraformer-FF6A00?style=flat-square)](https://dashscope.aliyuncs.com/)
 
 </div>
@@ -20,12 +20,31 @@
 | 🔗 | **链接即分析** | 支持抖音 / B站 / 小红书 / 快手，短链、分享文案直接往里贴，自动裁剪出干净链接 |
 | 📄 | **逐字稿** | DashScope Paraformer 转写，带时间戳；长音频自动切片并发处理 |
 | 🧠 | **AI 总结** | 结构化摘要；另有 `interview` 模式专门做面经/知识点提取 |
-| 💬 | **观众评论** | 抖音走内置直连接口，零依赖抓取，并把评论一并喂给 LLM |
+| 💬 | **观众评论** | 独立评论中心支持分页、回复与导出；未部署服务时可降级为热门样本 |
 | 🤖 | **AI 追问** | 针对已完成的任务继续提问，模型只依据该视频的转写稿作答 |
 | 📤 | **本地上传** | 拖进音频/视频文件即可分析，绕开一切平台风控 |
-| 🗂️ | **历史与隔离** | 任务持久化在 SQLite，按浏览器身份隔离，重启不丢、互不串号 |
-| 🔑 | **访问鉴权** | 可选的共享令牌（中间件默认拒绝 + 白名单），保护上传、Cookies 抓取与全部任务数据 |
+| 🗂️ | **历史与隔离** | SQLite 持久化；注册用户按签名账号隔离，跨设备访问自己的任务 |
+| 🔑 | **账号安全** | 邮箱验证码注册、忘记密码与修改密码；管理员与普通用户独立授权 |
+| | **本地登录助手** | Windows 打开独立抖音窗口，登录后自动保存到当前网站账号；手机保留扫码与导入 |
 | 🎨 | **沉浸式前端** | 结果四视图、媒体在线播放与下载、深浅色主题切换 |
+
+---
+
+## 界面截图
+
+以下截图来自隔离测试账号，工作台使用 Mock 示例，不包含真实平台凭据或真实用户数据。
+
+**任务工作台**
+
+![任务工作台与示例任务](docs/screenshots/workspace-desktop.png)
+
+**电脑版 Cookies 授权**
+
+![当前账号的 Windows 本地登录助手入口](docs/screenshots/cookies-desktop.png)
+
+| 手机端授权（测试环境未启用扫码服务） | 账号安全 |
+|---|---|
+| ![手机端 Cookies 授权入口](docs/screenshots/cookies-mobile.png) | ![邮箱验证修改密码](docs/screenshots/account-security.png) |
 
 ---
 
@@ -80,18 +99,16 @@ python cli.py "https://example.com/video" --mode interview
 | ⚡ 快手 | 内置 `KuaishouDownloader`（移动端分享页解析） | 否 |
 | 📺 B站 | 详情/播放 API 解析 + yt-dlp 下载音视频流 | 公开视频通常不需要；权限视频需对应登录态 |
 | 📕 小红书 | yt-dlp | 否 |
-| 🌐 其他 | yt-dlp 通用提取 | 视平台而定 |
+| 🌐 YouTube | yt-dlp，支持正规视频和 Shorts 链接 | 视视频权限而定 |
+| 🌐 其他 | 本地或管理员可使用 yt-dlp 通用提取；普通账号仅接受支持平台的正规单视频链接 | 视平台而定 |
 
-> **为什么抖音不用 yt-dlp 了？**
-> yt-dlp 的抖音提取器走 `www.douyin.com/aweme/v1/web/aweme/detail/`，该接口已强制 `a_bogus` 签名校验
-> （yt-dlp 至 2026.08.19 仍未实现，源码仅留 TODO），**即使 Cookies 齐全也一律 403**，
-> 报 `Fresh cookies are needed` —— 反复重新登录是无效的。
+> **抖音下载路径**：本项目默认解析移动分享页的 SSR 视频数据，不依赖 yt-dlp 的抖音详情提取器。
+> 登录态、地区、平台风控和页面结构变化仍可能影响解析；重新登录并不能保证解决所有 403。
 
 > **B 站 HTTP 412**：普通视频及 `b23.tv` 分享短链通过详情和播放 API 解析，
 > 再将音视频流交给 yt-dlp 下载，避免访问被风控的视频 HTML。支持 BV/av 链接和 `?p=2` 分 P。
 > 详情接口被 412 拦截时自动改用分 P 接口取得标题、时长和播放编号；此时无法取得的 UP 主信息留空。
 > 如 API 也触发风控，页面会提示稍后重试、上传 B 站 Cookies 或上传本地视频。
-> 本项目改走 `m.douyin.com` 移动分享页：SSR 数据里直接内嵌视频地址，再拼无水印直链下载。
 
 > **B 站 HTTP 567**：下载使用 1 MiB Range 分块，避免部分 CDN 对整文件请求的拒绝。
 > 保留 API 返回的备用节点，下载前检查所选候选地址；失败候选自动跳过。
@@ -166,20 +183,34 @@ curl -X POST http://127.0.0.1:8000/tasks/<task_id>/chat `
 | `GET` | `/tasks/{id}/media` | 在线预览媒体（支持 Range） |
 | `GET` | `/tasks/{id}/video` | 下载源视频（mp4） |
 | `POST` | `/cookies` | 上传 `cookies.txt` |
+| `DELETE` | `/cookies` | 清除本账号的抖音登录态，保留其他平台授权和历史任务 |
 | `GET` | `/cookies/status` | 查看 Cookies 状态 |
 | `POST` | `/cookies/qr/start` | 启动网页内扫码（已配置私有浏览器）或本地桌面登录 |
 | `GET` | `/cookies/qr/{session_id}/status` | 查询本客户端扫码状态与二维码 |
 | `DELETE` | `/cookies/qr/{session_id}` | 取消本客户端的网页扫码会话 |
 | `POST` | `/cookies/browser/*` | 专用浏览器窗口抓取登录态 |
+| `POST` | `/cookies/helper/start` | 为当前账号创建 Windows 本地助手授权 |
+| `GET` | `/cookies/helper/{id}/status` | 查询当前账号的本地授权结果 |
+| `DELETE` | `/cookies/helper/{id}` | 取消当前账号的本地授权 |
+| `GET` | `/cookies/helper/download` | 下载 Windows 本地登录助手 |
 | `GET` | `/health` | 探活（含是否启用鉴权） |
 | `POST` | `/auth/session` | 用访问令牌换取鉴权 Cookie |
 | `POST` | `/auth/login` | 管理员账号或已验证邮箱登录 |
 | `POST` | `/auth/register/code` | 发送邮箱注册验证码 |
 | `POST` | `/auth/register` | 校验邮箱验证码，创建账号并登录 |
-| `GET` | `/auth/me` | 当前账号和注册开放状态（不含凭据） |
+| `GET` | `/auth/me` | 当前账号、绑定邮箱和邮件服务状态（不含凭据） |
+| `GET` | `/forgot-password` | 忘记密码页面 |
+| `GET` | `/account` | 登录后的账号安全页面 |
+| `POST` | `/auth/password/reset/code` | 向账号绑定邮箱发送重置验证码，统一响应 |
+| `POST` | `/auth/password/reset` | 校验验证码并重置密码，不自动登录 |
+| `POST` | `/auth/password/change/code` | 校验当前密码后发送改密验证码 |
+| `POST` | `/auth/password/change` | 校验当前密码和邮箱验证码后修改密码 |
+| `POST` | `/auth/email/bind/code` | 未绑定邮箱的管理员验证当前密码后发送绑定验证码 |
+| `POST` | `/auth/email/bind` | 验证当前密码和验证码，首次绑定管理员安全邮箱 |
 
-> 除 `/`、`/static/*`、`/health`、`/auth/session` 外，**设置 `VIDEOINSIGHT_AUTH_TOKEN`
-> 后所有端点都需要令牌**；不设置则全部开放。
+> 启用账号登录或共享令牌后，业务端点默认受保护；登录、注册、重置密码、
+> 静态资源和探活等公开入口例外。改密和绑定邮箱必须持有账号登录会话，
+> 不能只用共享令牌。
 
 <details>
 <summary><b>历史记录与删除</b></summary>
@@ -192,14 +223,15 @@ curl "http://127.0.0.1:8000/tasks?status=succeeded"
 curl -X DELETE http://127.0.0.1:8000/tasks/<task_id>
 ```
 
-历史列表按浏览器生成的 `client_id` 隔离（请求头 `X-Client-Id`），看不到别人的任务。
+注册账号的任务归属由服务器验证的签名会话决定，`X-Client-Id` 不能指定其他账号。
+管理员的既有浏览器历史和未启用账号的本地模式仍兼容 `client_id`。
 
 > **归属规则（严格匹配）**：请求身份必须与任务归属完全一致，否则一律 404。
 > 不带 `X-Client-Id` 提交的任务归属为"无身份"，只能被同样不带身份的请求看到 ——
 > 它既不会对带身份的客户端开放，也不会从历史列表里消失。
 >
-> ⚠️ `client_id` 是浏览器自造的 UUID，**是隔离约定，不是身份认证**：它只防止
-> 前端串号，任何人都能伪造一个。真正的访问控制见下方「访问鉴权」。
+> ⚠️ 旧版 `client_id` 是浏览器自造的 UUID，**不是身份认证**。不要把共享令牌
+> 或未鉴权的本地模式当作多用户安全边界；公网多用户部署应启用账号登录。
 
 </details>
 
@@ -232,8 +264,34 @@ SMTP 密码应为邮箱授权码，不是邮箱登录密码；不要提交真实
 
 注册账号的任务、媒体和评论归属由服务器签名会话决定，不能通过
 `client_id`、`X-Client-ID` 或浏览器身份 Cookie 指定，可跨设备登录访问。
-注册账号不能修改服务器共用的平台 Cookies；这些授权仍由管理员维护。
+注册账号可在「Cookies 授权」中扫码登录自己的抖音，或导入自己的授权。
+Cookies 按账号独立保存在数据库目录旁的 `account-cookies/<账号摘要>/cookies.txt`，
+不放在公开媒体目录；后台任务与重启恢复均使用任务所属账号的授权。
+未授权或授权失效时，不会回退到管理员文件、系统浏览器或管理员专用登录窗口。
+管理员现有授权保留，不会复制给注册账号。云端普通用户可使用 Windows 本地助手、
+已启用的页内扫码服务或手动导入，不能使用服务器共享的桌面浏览器；
+同一账号跨设备登录仍使用本人的授权。
 账号和验证码表与任务共用数据库，备份时一并保留。
+
+登录页的「忘记密码」通过已注册或已绑定的安全邮箱验证身份；登录后的
+「账号安全」支持修改密码，同时校验当前密码和邮箱验证码。新密码仍为
+10 至 128 位。改密成功后不自动登录，所有设备的旧签名会话立即失效，
+账号 ID 和历史任务保持不变。
+
+「退出登录」会撤销当前设备的签名会话和待完成的助手授权，复制的旧会话不能继续使用；
+其他设备的正常会话不受单次退出影响。共享 API 令牌不是账号会话，需要运维单独轮换。
+
+管理员首次使用恢复功能前，须在「账号安全」中用当前密码和邮箱验证码
+绑定本人邮箱。不会将 SMTP 发件邮箱默认当作管理员的恢复邮箱，也不支持
+通过当前登录会话直接换绑邮箱。绑定后的管理员可用原账号名或安全邮箱登录。
+管理员密码更新和邮箱绑定保存在私有 SQLite 中，不会重写环境文件；
+运维主动更换 `VIDEOINSIGHT_AUTH_PASSWORD_HASH` 时，以新的引导密码为准，
+旧密码覆盖记录及邮箱绑定停用，须重新验证绑定。
+
+注册、绑定、改密、重置验证码按用途隔离，不能互用。各操作的验证码
+10 分钟有效、单次使用、错误 5 次失效，同操作同邮箱有 60 秒重发冷却；
+每小时和每日邮件配额由各用途共同使用。SMTP 配置完整时，即使关闭新用户
+注册，已有账号仍可恢复或修改密码。未绑定邮箱的管理员不能走忘记密码恢复。
 
 反向代理部署时，将 `VIDEOINSIGHT_TRUSTED_PROXY_IPS` 设为实际代理的对端 IP；
 仅对这些对端信任 `X-Real-IP`，并确保代理覆盖此头。不会使用调用方的
@@ -246,8 +304,10 @@ SMTP 密码应为邮箱授权码，不是邮箱登录密码；不要提交真实
 <details>
 <summary><b>访问鉴权（可选）</b></summary>
 
-默认**不启用**，行为与之前完全一致。设置 `VIDEOINSIGHT_AUTH_TOKEN` 后，除公开路径
-（`/`、`/static/*`、`/health`、`/auth/session`）外的**所有**请求都必须携带令牌：
+共享令牌模式默认**不启用**。设置 `VIDEOINSIGHT_AUTH_TOKEN` 后，可用以下方式访问
+受保护的 API；有效的邮箱账号登录会话同样可以通过鉴权，不需要再填写共享令牌。
+公开页面、健康检查及受单独凭证保护的登录回调不要求此令牌。
+不设置共享令牌不代表关闭已配置的账号登录或管理员密码保护。
 
 ```powershell
 # 方式一：Bearer（脚本 / curl / 第三方集成）
@@ -430,7 +490,7 @@ Key 仅保存在 Git 忽略的 `.env`，不会通过健康检查或任务诊断�
 | `VIDEOINSIGHT_MEDIA_DIR` | `media` | 媒体与 Cookies 目录 |
 | `VIDEOINSIGHT_DB_PATH` | `data/videoinsight.db` | SQLite 路径 |
 | `VIDEOINSIGHT_MAX_UPLOAD_MB` | `2048` | 单个上传文件大小上限 |
-| `VIDEOINSIGHT_AUTH_TOKEN` | — | 共享访问令牌；**不设置则不鉴权**，设置后所有非公开端点都要带令牌 |
+| `VIDEOINSIGHT_AUTH_TOKEN` | — | 可选共享访问令牌；有效账号会话也可鉴权，不设置不会关闭其他登录保护 |
 | `VIDEOINSIGHT_TASK_CORE_WORKERS` | `2` | 核心任务并发；不会超过最大并发 |
 | `VIDEOINSIGHT_MAX_CONCURRENT_TASKS` | `4` | 等待队列满时允许扩展到的最大任务并发 |
 | `VIDEOINSIGHT_TASK_QUEUE_CAPACITY` | `32` | FIFO 等待队列容量；全部占满后拒绝新提交 |
@@ -453,7 +513,8 @@ Key 仅保存在 Git 忽略的 `.env`，不会通过健康检查或任务诊断�
 
 ## 🍪 抖音 Cookies
 
-多数公开视频可直接解析；遇到登录态或风控提示时，再配置 Cookies。
+当前抖音下载流程需要有效的 `ttwid` Cookie；建议先完成授权再解析抖音视频。
+账号权限、登录态、地区和平台风控仍可能影响解析，其他平台的要求见上方支持平台表。
 
 **服务器 / Docker：网页扫码登录**
 
@@ -486,9 +547,20 @@ docker compose -f deploy/qr-browser/compose.yaml up -d
 Cookies 是敏感登录凭据，请仅导入自己信任的服务，并使用 HTTPS 或 SSH 加密隧道，
 不要提交到 Git。
 
+**清除本账号授权**
+
+在「Cookies 授权」点击「清除本账号抖音登录态」并确认。仅移除本账号保存的
+抖音 Cookie，同时取消本账号的扫码会话并清理评论服务中的对应授权副本。
+其他账号、其他平台 Cookies、历史任务和应用账号登录不受影响。
+清除后禁止后台自动读取浏览器来恢复旧授权；重新扫码或显式导入后恢复使用。
+这不会登出手机抖音，也不会撤销抖音平台上的其他设备会话。
+应用账号需退出时，使用侧栏「退出登录」。
+
 **本地桌面：扫码登录**
 
-网页左侧「平台 Cookies」→ 扫码登录。抓到的 Cookies 保存在 `media/_cookies/cookies.txt`，无需重启服务。
+管理员在本地桌面模式下，可通过「Cookies 授权」扫码登录，默认保存在
+`media/_cookies/cookies.txt`，无需重启服务。注册账号只使用前述账号私有路径，
+不会读取这个管理员文件，也不能使用共享桌面窗口。
 
 **本地桌面：专用浏览器窗口**
 
@@ -498,8 +570,19 @@ Cookies 是敏感登录凭据，请仅导入自己信任的服务，并使用 HT
 
 > 只读取项目专用窗口的 Cookies，不碰你日常浏览器的配置。
 
-> ⚠️ 如果提示「抖音拒绝了当前请求」，那不是 Cookies 过期 —— 而是触发了抖音临时风控。
-> 稍后重试，或改用上传本地视频。
+**云端网站：Windows 本地登录助手**
+
+在 HTTPS 网站的「Cookies 授权」下载并安装 Windows 助手。之后点击
+「打开抖音登录窗口」，核对助手显示的目标账号，再在专用窗口完成抖音登录，
+Cookies 会自动保存到当前网站账号。管理员和普通用户均可使用，各自授权独立。
+每次使用新的临时浏览器配置，不复用管理员或上一个网站账号的本机登录态。
+取消、过期、退出网站、改密或清除授权后，旧凭证不能重新写回 Cookies。
+手机端仍可使用页内扫码和手动导入。
+
+安装、构建、可信来源及安全边界详见 [本地登录助手](docs/local-login-helper.md)。
+
+> ⚠️ 「抖音拒绝了当前请求」不能单独证明 Cookies 有效或已过期，也可能与账号权限、
+> 地区或平台风控有关。可重新授权、稍后重试，或改用上传本地视频。
 
 ---
 
@@ -527,6 +610,12 @@ flowchart LR
 ```text
 app/
   main.py                  FastAPI 入口（任务、Cookies、媒体、对话）
+  account_auth.py          账号登录、邮箱验证、密码恢复与会话撤销
+  account_store.py         账号、验证码、配额与撤销会话的 SQLite 存储
+  local_login.py           本地助手的一次性账号授权与自动保存
+  remote_qr.py             隔离浏览器中的网页扫码、确认与状态轮询
+  media_urls.py            普通账号的官方单视频 URL 规范化
+  url_safety.py            公网目标验证、DNS 固定与原域名 TLS 校验
   workflow.py              固定工作流编排
   task_store.py            SQLite 持久化任务存储
   schemas.py               请求、任务和结果模型
@@ -548,7 +637,10 @@ app/
   security.py              可选的共享令牌鉴权中间件
 web/
   index.html / app.js / styles.css   前端页面
-tests/                               测试用例（178 passed）
+  account.* / login.* / auth-common.js   登录、注册与账号安全
+  local-login.js                     助手调用与可恢复的状态轮询
+local_helper/                        Windows 助手、协议安装与构建
+tests/                               Python、Node 与真实浏览器回归
 verify_real_chain.py                 真实链路验证脚本
 verify_kuaishou_video.py             快手全流程调试脚本
 verify_comments_chain.py             评论链路验证脚本（mock 转写 + 真实评论接口）
@@ -562,12 +654,26 @@ docs/                                集成评估、评论数据产出、参赛�
 ```powershell
 pip install pytest
 pytest --basetemp=_pytest_tmp -q
+node --test tests/local-login.test.cjs tests/comment-utils.test.cjs
 ```
 
-当前 **178 passed / 0 failed**，覆盖下载器路由、评论解析、ASR 切片容错、任务归属隔离、
-链接解析、LLM 适配，ffmpeg / yt-dlp 的超时兜底，上传限额，产物回收的全部安全边界
-（不碰登录态资产、不碰在跑任务、不碰用户源文件），以及并发闸门与重启对账、
-访问鉴权的"默认不启用 / 启用后逐个入口都拦得住"。
+2026-11-16 正式测试目录完整验证为 **776 passed / 0 failed**，
+另有 **41 项部署脚本测试**和 **5 项 Node 测试**通过。
+覆盖账号登录与邮箱验证码、改密与退出后的旧会话重放、跨账号 Cookies、
+助手领取/保存/撤销及并发、官方视频 URL、DNS 固定和 TLS 原域名验证、
+模型输出密钥脱敏，以及下载、转写、任务队列和产物回收。
+
+普通 `pytest` 会跳过需要真实浏览器的可选集成测试。完整验证额外启用了
+`HELPER_BROWSER_TEST=1` 和指向全新隔离 Chromium 的 `QR_TEST_BROWSER_URL`，
+不使用日常浏览器配置；真实 TLS 测试使用可选的 `cryptography` 测试依赖。
+测试进程清空本机鉴权环境覆盖，未修改私有 `.env`。有一条既有测试依赖弃用警告。
+`pytest.ini` 限定默认收集 `tests`，不扫描 `output` 中的临时脚本和测试副本。
+
+浏览器回归脚本包括 `tests/browser_local_helper_smoke.js`、
+`tests/browser_password_smoke.js` 和 `tests/browser_qr_smoke.js`；
+对隔离服务 `tests/password_browser_server.py` 验证授权、成功提示、刷新续查、
+取消、错误恢复及 320/390/768/1440px 布局。截图由
+`tests/browser_readme_screenshots.js` 在全新浏览器会话生成。
 
 > 长任务改为异步执行后，`POST` 不再等任务跑完才返回，测试改用轮询（`tests/conftest.py`
 > 的 `wait_for_task`）来断言终态 —— 这比原来的"提交完立刻断言 succeeded"更贴近真实契约。
@@ -578,12 +684,28 @@ pytest --basetemp=_pytest_tmp -q
 
 **已完成**：API 提交/查询/列表/删除、文件上传分析、抖音免签名下载、观众评论抓取、AI 追问、
 Mock 全链路闭环、可替换的下载/ASR/LLM 模块、SQLite 持久化、沉浸式 Web 前端、
-有界并发与重启对账、产物自动回收、可选的共享令牌鉴权。
+有界并发与重启对账、产物自动回收、邮箱账号与密码恢复、账号独立 Cookies、
+Windows 本地登录助手、移动端授权入口、可选的共享令牌鉴权。
 
-**暂不包含**：速率限制与账号体系（鉴权是单个共享密钥，没有权限粒度）、
-Celery + Redis 分布式队列（长任务目前走进程内线程池，单机可用但无法横向扩展、
-任务也不跨进程调度）、TLS 终止、飞书机器人、PostgreSQL、内容安全与事实核查、
-多模态画面分析。
+**安全边界**：
+
+- 注册与密码邮件接口有持久化配额；这不等于全站都有按用户计费或调用限流。
+- 普通用户自备 LLM 地址仅允许公网 HTTP(S)，拒绝私网、混合 DNS 结果、重定向及含凭据的地址；
+  连接固定到已校验的 IP，并保留原域名的 TLS 验证。管理员和服务端配置仍是受信任配置，可接内网模型。
+- 普通账号只提交支持平台的正规视频地址，短链逐跳校验后规范化；通用 yt-dlp 仅用于本地或管理员。
+  视频平台和其返回的 CDN 仍属于受信任的下载依赖，公网部署建议另加网络出口隔离。
+  旧评论任务若不是规范化地址，重试会被拒绝，需要用完整官方链接重新创建。
+- 上游模型错误与测试输出会过滤本次使用的 API Key；真实密钥、Cookies、浏览器状态和环境文件不得入库。
+- `requirements.txt` 引入 `constraints-security.txt` 的补丁版本下限；可用 `pip-audit` 复查实际安装环境，
+  这不是依赖锁文件，也不承诺未来没有新告警。
+- Windows 助手未签名、不自动升级，不支持 macOS/Linux；手机使用扫码或手动导入。
+  自动化验证使用合成 Cookies，真实抖音手机确认与平台风控仍需本人实测。
+- HTTPS 由反向代理终止；公网账号登录和本地助手必须配置可信 HTTPS。
+
+本轮已复现问题、修复与验证边界见 [安全回归记录](docs/security-review-20261116.md)。
+
+**暂不包含**：Celery + Redis 分布式队列（目前是单机进程内线程池，任务不跨进程调度）、
+飞书机器人、PostgreSQL、内容安全与事实核查、多模态画面分析。
 
 ---
 

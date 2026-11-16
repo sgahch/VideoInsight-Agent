@@ -3,9 +3,9 @@
 
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>VideoInsight Agent - 沉浸式 AI 视频分析平台</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261111-inline-qr1" />
+  <link rel="stylesheet" href="/static/styles.css?v=20261115-helper1" />
   <link rel="stylesheet" href="/static/queue.css?v=20261106-used1" />
 </head>
 
@@ -47,6 +47,7 @@
         </a>
       </nav>
 
+      <a id="accountSecurity" class="sidebar-nav-item" href="/account" hidden>账号安全</a>
       <button id="accountLogout" class="btn btn-secondary" type="button" hidden>退出登录</button>
 
       <!-- 主题切换 -->
@@ -394,16 +395,38 @@
         <div class="cookie-box">
           <p id="cookieAuthHint" class="settings-note">授权方式检查中...</p>
 
+          <div id="cookieReadOnly" class="cookie-access-group" hidden>
+            <p class="cookie-message">授权状态暂时不可用，请刷新重试。</p>
+            <button id="refreshSharedCookies" class="btn btn-secondary full-width" type="button">刷新授权状态</button>
+          </div>
+
+          <div id="cookieAdminControls" class="cookie-access-group" hidden>
+          <div id="localHelperControls" class="cookie-access-group" hidden>
+            <button id="startLocalLogin" class="btn full-width" type="button">打开抖音登录窗口</button>
+            <div class="local-helper-actions">
+              <a id="downloadLocalHelper" class="mini-btn" href="/cookies/helper/download" download>下载 Windows 助手</a>
+              <a id="helperSecureLink" class="mini-btn" hidden>切换到 HTTPS</a>
+              <a id="reopenLocalHelper" class="mini-btn" hidden>重新打开助手</a>
+              <button id="cancelLocalLogin" class="mini-btn" type="button" hidden>取消本次授权</button>
+            </div>
+            <p id="localHelperMessage" class="cookie-message" role="status" aria-live="polite"></p>
+          </div>
           <button id="startQrLogin" class="btn full-width" type="button" hidden>登录/刷新抖音 Cookies</button>
+          <button id="clearCookieLogin" class="mini-btn cookie-clear-button" type="button" disabled>清除本账号抖音登录态</button>
 
           <div id="qrView" class="qr-login-view" hidden>
             <div id="qrStage" class="qr-code-stage">
-              <img id="qrImage" class="qr-image" alt="抖音登录二维码" hidden />
+              <img id="qrImage" class="qr-image" width="198" height="198" alt="抖音登录二维码" hidden />
               <span id="qrPlaceholder">正在生成二维码...</span>
             </div>
             <div class="qr-login-status">
               <p id="qrMessage" class="cookie-message" role="status" aria-live="polite"></p>
-              <button id="cancelQrLogin" class="mini-btn" type="button" hidden>取消登录</button>
+              <p id="qrExpiry" class="qr-expiry" aria-live="off" hidden></p>
+              <div class="qr-login-actions">
+                <a id="saveQrImage" class="mini-btn" download="douyin-login.png" hidden>保存二维码</a>
+                <button id="cancelQrLogin" class="mini-btn" type="button" hidden>取消登录</button>
+              </div>
+              <p id="qrMobileHint" class="qr-mobile-hint" hidden>同一部手机可先保存或长按二维码，再到抖音扫一扫中尝试从相册识别；若不支持，请使用另一台设备扫码。</p>
             </div>
           </div>
 
@@ -431,8 +454,9 @@
               </div>
             </div>
           </details>
+          </div>
 
-          <p id="cookieMessage" class="cookie-message">链接解析失败时再配置。</p>
+          <p id="cookieMessage" class="cookie-message" role="status" aria-live="polite"></p>
         </div>
       </section>
 
@@ -544,7 +568,8 @@
 
   <script src="/static/comment-utils.js?v=20261105"></script>
   <script src="/static/queue.js?v=20261106-used1"></script>
-  <script src="/static/app.js?v=20261112-email"></script>
+  <script src="/static/local-login.js?v=20261116-helper101"></script>
+  <script src="/static/app.js?v=20261116-helper101"></script>
 </body>
 
 </html>

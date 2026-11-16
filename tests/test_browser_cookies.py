@@ -170,3 +170,34 @@ def test_import_mode_never_probes_or_launches_browser(monkeypatch, tmp_path, mod
         with pytest.raises(browser_cookies.BrowserCookieError, match="上传对应平台"):
             operation(runtime_settings)
     assert not list(tmp_path.iterdir()), "Import mode must not create desktop profile files"
+
+
+@pytest.mark.parametrize("url", [
+    "https://douyin.com.evil.example/",
+    "https://notdouyin.com/",
+    "https://example.com/?next=https://www.douyin.com/",
+    "about:blank",
+])
+def test_capture_does_not_treat_unrelated_tabs_as_douyin(url):
+    assert browser_cookies._pick_douyin_tab([{"url": url, "webSocketDebuggerUrl": "ws://127.0.0.1/page"}]) is None
+
+
+@pytest.mark.parametrize("cookie", [
+    {"domain": ".notdouyin.com", "name": "sessionid", "value": "unrelated"},
+    {"domain": ".douyin.com.evil.example", "name": "sessionid", "value": "unrelated"},
+    {"domain": ".douyin.com", "name": "sessionid", "value": ""},
+    {"domain": ".douyin.com", "name": "sessionid", "value": "expired", "expires": 123},
+])
+def test_capture_rejects_unrelated_empty_and_expired_login_cookies(monkeypatch, tmp_path, cookie):
+    config = Settings(media_dir=tmp_path / "media", cookie_login_mode="desktop")
+    monkeypatch.setattr(browser_cookies, "_require_desktop_login", lambda _: None)
+    monkeypatch.setattr(browser_cookies, "_active_debug_port", lambda _: 9224)
+    monkeypatch.setattr(browser_cookies, "_get_tabs", lambda _: [
+        {"url": "https://www.douyin.com/", "webSocketDebuggerUrl": "ws://127.0.0.1/page"},
+    ])
+    monkeypatch.setattr(browser_cookies, "_read_cookies_from_tab", lambda _: [
+        cookie, {"domain": ".douyin.com", "name": "ttwid", "value": "anonymous"},
+    ])
+    result = browser_cookies.capture_douyin_cookies(config)
+    assert not result["saved"] and not result["has_login_cookie"]
+    assert not (config.media_dir / "_cookies/cookies.txt").exists()
