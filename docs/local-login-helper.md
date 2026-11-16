@@ -124,7 +124,7 @@ Real phone approval and platform-side anti-abuse challenges require user testing
 
 ## Version 1.0.1
 
-Built on 2026-11-16 for the `videoinsight:49330ba` candidate. The helper trusts
+Deployed on 2026-11-16 as `videoinsight:49330ba`. The helper trusts
 `https://206.187.222.21`; public HTTP redirects to HTTPS. The Windows executable
 SHA-256 is
 `6bb4513e494505897481a78a14af6b4c41b2102311e169cb05a6e9364f84f4a9`.
@@ -139,9 +139,16 @@ protocol associations. Windows cleanup tests include a real delayed file lock
 and reject directory junctions. Both website roles passed isolated browser
 checks at 320, 390, 768, and 1440 CSS pixels.
 
-The candidate passed isolated service checks for account separation, private
+The release passed isolated and production service checks for account separation, private
 files, one-time claims, revocation, logout-session replay, and exact download
-hashes. Deployment results are recorded separately in
-[the server runbook](../deploy/ip-server.md); before this rollout, the last
-verified production image was `videoinsight:0319728`.
+hashes. Both roles passed live HTTPS start/cancel and layout checks at
+320, 390, 768, and 1440 CSS pixels, plus a mobile-user-agent QR fallback check.
+A fresh real Edge profile captured synthetic HttpOnly Cookies; the actual
+native client saved them over certificate-verified HTTPS to a temporary ordinary
+account. The account, private Cookies, temporary profile, and exported browser
+states were removed. Existing accounts and full task rows match the backup;
+administrator authorization is unchanged.
+
+The previous image was `videoinsight:0319728`. Deployment and rollback details
+are recorded in [the server runbook](../deploy/ip-server.md).
 No real Douyin login or phone approval was performed.

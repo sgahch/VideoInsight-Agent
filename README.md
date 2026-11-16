@@ -42,7 +42,7 @@
 
 ![当前账号的 Windows 本地登录助手入口](docs/screenshots/cookies-desktop.png)
 
-| 手机端授权（测试环境未启用扫码服务） | 账号安全 |
+| 手机端授权（合成授权测试账号） | 账号安全 |
 |---|---|
 | ![手机端 Cookies 授权入口](docs/screenshots/cookies-mobile.png) | ![邮箱验证修改密码](docs/screenshots/account-security.png) |
 
@@ -673,7 +673,8 @@ node --test tests/local-login.test.cjs tests/comment-utils.test.cjs
 `tests/browser_password_smoke.js` 和 `tests/browser_qr_smoke.js`；
 对隔离服务 `tests/password_browser_server.py` 验证授权、成功提示、刷新续查、
 取消、错误恢复及 320/390/768/1440px 布局。截图由
-`tests/browser_readme_screenshots.js` 在全新浏览器会话生成。
+`tests/browser_readme_screenshots.js` 在全新浏览器会话生成；手机扫码入口截图取自
+`tests/browser_local_helper_live.js` 使用的线上临时测试账号，未进行真实抖音登录。
 
 > 长任务改为异步执行后，`POST` 不再等任务跑完才返回，测试改用轮询（`tests/conftest.py`
 > 的 `wait_for_task`）来断言终态 —— 这比原来的"提交完立刻断言 succeeded"更贴近真实契约。

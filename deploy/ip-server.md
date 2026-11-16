@@ -762,3 +762,79 @@ the new TLS listener as well as restoring the old application container. The
 old image does not understand the trusted forwarded HTTPS scheme, so reverting
 only the image would break same-origin authenticated HTTPS requests. TLS renewal
 scheduling must also be reviewed as part of that rollback.
+
+## 2026-11-16: Security Review And Helper 1.0.1
+
+`videoinsight:49330ba` replaces `videoinsight:0319728`. The runtime identifier
+hashes application/frontend sources, the helper executable, requirements,
+the deployment Dockerfile, and the installer wheel, not a Git commit.
+The source changes and four README screenshots were pushed to GitHub in
+`a32ed96` before the production switch. This section records the completed
+deployment; the separate security report is
+[`docs/security-review-20261116.md`](../docs/security-review-20261116.md).
+
+The review fixed signed-session replay after logout, ordinary-user SSRF paths,
+upstream model-key disclosure, a helper-start/logout race, blocking helper
+persistence, invalid login-Cookie detection, exhausted polling, native
+cancellation/cleanup/uninstallation handling, and malformed model JSON errors.
+Official single-video URL validation also applies to recovered queued tasks,
+source-video downloads, comment creation, and comment retries.
+
+The Windows helper is version 1.0.1. Its SHA-256 is
+`6bb4513e494505897481a78a14af6b4c41b2102311e169cb05a6e9364f84f4a9`.
+Existing installations must download and install the new executable.
+It remains unsigned, Windows-only, and without automatic updates.
+The executable self-test passed; it was not installed on the developer's
+actual Windows user. Real file-lock cleanup and junction rejection were tested.
+
+The formal Python suite passed 776 tests with real isolated browser integration
+enabled, with one existing dependency deprecation warning. The independent
+deployment-script suite passed 41 tests and Node passed five tests.
+Default pytest collection now excludes temporary scripts under `output`.
+Isolated browser fixtures covered password recovery/change and helper/QR
+states at 320/390/768/1440px. The README uses synthetic test data; its mobile
+QR-entry screenshot came from the temporary production test account.
+
+`pip-audit` reported no known advisories in the developer environment or the
+actual 59-package candidate inventory after the dependency fixes.
+The production application dependencies already met the security floors;
+this image additionally upgraded pip from 25.2 to 26.3 using an offline wheel.
+The normal Dockerfile upgrades pip and includes `constraints-security.txt`.
+This is a point-in-time Python advisory check, not an OS/container scan or a
+claim that no other vulnerabilities exist.
+
+The TLS maintenance gate temporarily blocked new submissions, authorizations,
+and task deletion. Existing queued/running tasks, QR contexts, and helper
+handoffs drained before the application was stopped and SQLite was backed up.
+This does not guarantee draining every unqueued long HTTP request, such as an
+in-progress streaming chat. The gate was removed after service checks passed.
+The original HTTP and TLS Nginx files were restored byte-for-byte.
+
+Production checks verified account-private atomic Cookie saving, mode 0600,
+single-use claims, idempotence, cross-account denial, logout/password/clear
+revocation, replay rejection, private-URL rejection, and executable hashes.
+A real isolated Edge captured synthetic HttpOnly Cookies, and the actual native
+client saved them to a temporary ordinary account over certificate-verified
+public HTTPS. Both roles passed live start/cancel and layout checks at all
+four widths without changing existing authorization. A mobile user agent
+retained QR authorization and hid Windows-only controls.
+No real Douyin login, phone approval, or real verification email was performed
+by this review.
+
+Temporary accounts, private Cookies, browser profiles/states, and the unpublished
+staging container were removed. Existing accounts and full task rows matched
+the pre-switch backup, and administrator Cookies were unchanged. Runtime source
+and helper hashes match the verified local build. Main, QR browser, and Groq
+proxy containers are healthy; the latter two were not replaced. HTTP still
+redirects to HTTPS with status 308, certificate verification passed, and the
+existing TLS renewal cron remains active.
+
+Rollback resources are protected under
+`/opt/videoinsight/backups/20261116-local-helper-49330ba-security`.
+The previous application container is stopped with restart disabled as
+`videoinsight-before-local-helper-49330ba-security`. Reverting this release
+to `0319728` does not require disabling HTTPS: both understand the existing
+trusted proxy scheme. The older `0319728`-to-`b95e885` rollback caveat above
+still applies to that separate historical transition.
+Sources, tests, screenshots, helper/build inputs, and verification scripts are
+archived with hashes under `/opt/videoinsight/releases/49330ba`.
