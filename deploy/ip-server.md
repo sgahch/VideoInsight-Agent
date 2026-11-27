@@ -1015,3 +1015,61 @@ Private backup:
 `/opt/videoinsight/backups/20261127-local-helper-92889b2-retryfix`.
 Committed source and release manifest:
 `/opt/videoinsight/releases/92889b2`.
+
+## 2026-11-27: Multi-Provider ASR And Working Offline Transcription
+
+`videoinsight:49e581f` replaces `videoinsight:92889b2`. The code and follow-up
+review fixes were pushed to GitHub before production replacement. The default
+is now CPU/int8 faster-whisper base, with real segment timestamps. The image
+adds faster-whisper 1.2.1; model weights are read-only under
+`/opt/videoinsight/models/base`, pinned to official Hugging Face revision
+`ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66`. Runtime audio processing is offline.
+The application keeps its 640 MiB/1.25 CPU limits, and local model processes
+run serially with bounded timeouts and exit after each 60-second chunk.
+
+New adapters support SiliconFlow SenseVoiceSmall and Cloudflare Workers AI
+Whisper. They remain disabled because their credentials are absent. Their
+contracts, free-plan gates, error classification and no-reupload behavior have
+automated tests; live cloud inference is not claimed. SenseVoice is text-only
+and cannot silently replace a timestamp-required service. Qwen3-ASR-1.7B is
+blocked because the current official price is nonzero. Groq remains available
+in code but is disabled in strict free-only mode until its free account is
+confirmed; the existing unhealthy proxy is no longer a required dependency.
+See [ASR configuration and limits](../docs/multi-asr.md).
+
+Per-task provider choices are pinned when queued and retained by ordinary and
+cookie-login retries. Unknown legacy retries use offline inference instead
+of silently uploading to a newly selected cloud. The earlier search/autofill
+fix remains in place. SRT and VTT downloads enforce task ownership and reject
+text-only results rather than manufacturing a timeline.
+
+Windows full regression passed 845 tests with seven optional skips before the
+review follow-ups; targeted follow-up tests passed. Final Linux regression
+passed 846 tests with eight optional skips, excluding the desktop Tk module.
+All 35 Node tests passed. The Linux run exposed a test-client Cookie-domain
+ambiguity: the tampering test sent valid and modified session Cookies together.
+It now replaces the original domain/path Cookie, correctly testing signature
+rejection. Independent review's build, consent, timeout and subtitle findings
+were fixed and rechecked before deployment.
+
+Both the isolated service and production completed actual Chinese audio
+through authenticated upload, offline ASR, history retrieval and SRT/VTT
+exports. Production processed the 6.73-second sample in 7.81 seconds.
+A public certificate-verified HTTPS test processed 74.06 seconds in 84.04
+seconds, producing 15 segments with the final segment ending at 73.68 seconds.
+The actual browser upload and SRT download also passed, with no horizontal
+overflow at 390px and 320px. Temporary test tasks were deleted; all five
+account rows, 26 historical tasks and the browser user's original 12 tasks
+were preserved. No paid inference or cross-provider re-upload was used.
+
+Submissions were paused, active tasks and login handoffs drained, then SQLite,
+private environment and both Nginx files were backed up. Only ASR default/free
+policy/model-path/timeout environment settings changed; other credentials and
+auxiliary containers were retained. The original gateway files were restored
+after verification. Main service and QR browser are healthy. The old Groq
+sidecar remains unhealthy and optional. The configured default works without it.
+
+Rollback container: `videoinsight-before-multi-asr-49e581f` (stopped, restart disabled).
+Private backup: `/opt/videoinsight/backups/20261127-multi-asr-49e581f`.
+Source, manifest and verification scripts: `/opt/videoinsight/releases/49e581f`.
+Rollback must restore the backed-up `.env` together with the old container.

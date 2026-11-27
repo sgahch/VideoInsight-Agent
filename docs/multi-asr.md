@@ -44,9 +44,12 @@ the process exits after each chunk so model memory is released. Default per-chun
 timeout is 180 seconds, total transcription budget 3600 seconds. The existing
 ffmpeg conversion timeout remains 1800 seconds.
 
-A real 9.278-second Chinese recording on the 2 GiB production server took
-5.64 seconds in an isolated benchmark, with peak RSS 347.6 MiB under a 512 MiB
-limit. These are short-sample measurements, not long-video throughput guarantees.
+The isolated model process peaked at 347.6 MiB RSS under a 512 MiB limit.
+The complete production upload/transcription workflow processed a real
+6.73-second Chinese recording in 7.81 seconds. A certificate-verified public
+HTTPS test processed 74.06 seconds in 84.04 seconds, yielding 15 timestamped
+segments through 73.68 seconds across the 60-second chunk boundary. SRT and
+VTT downloads passed. These measurements do not guarantee long-video throughput.
 Base Whisper may make recognition errors, including traditional Chinese output;
 larger models should not be loaded on this host without a new capacity check.
 
