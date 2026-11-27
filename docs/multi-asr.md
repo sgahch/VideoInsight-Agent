@@ -32,6 +32,41 @@ SiliconFlow pricing verification also fails closed if its official page cannot
 be parsed or no longer marks the model free. HTTP/auth/access/quota/timeout/
 configuration/capability/response errors are separated and redact upstream bodies.
 
+## Account configuration in the web interface
+
+Expand **配置转写服务 / API Key** below the new-task ASR selector. All four
+providers are available in the configuration form even when the task selector
+marks them unconfigured. Save the provider credentials to enable selection;
+the optional default applies only to new tasks. Queued jobs and explicit retries
+retain their original provider. Blank password fields retain saved credentials;
+clearing removes only the current account's override, preserving server defaults.
+
+The API exposes GET `/asr/settings`, PUT/DELETE `/asr/settings/{provider}` and
+POST `/asr/settings/{provider}/check`. Signed account ownership overrides browser
+headers. Administrator settings use a separate administrator scope. Keys are
+write-only, stored atomically under the database directory's `asr-settings/`
+folder with hashed filenames and Linux directory/file permissions 0700/0600.
+Include this folder in private server backups. Keys never enter task JSON or
+browser local storage. Identity resets clear the form and reject stale responses.
+
+The check action performs no audio inference or audio upload. It checks the local
+model, or cloud credential/network/free-policy prerequisites. Passing this check
+does not prove transcription quality or quota availability. Groq personal keys
+use a direct connection; only explicit server `GROQ_PROXY_URL` controls the shared
+server connection, and environment proxy variables are ignored. The configured
+timeout also applies to Groq.
+
+The web configuration release `d45ae50` was pushed to GitHub before the production
+cutover on 2026-11-27. Linux regression: 852 passed, 8 skipped; browser unit suite:
+40 passed. The final commit only extends the frontend check timeout relative to
+the Python regression image. The deployed candidate and production both passed
+real 6.73-second audio transcription, segment timestamps and protected SRT/VTT
+export; production processing took 7.28 seconds. A real logged-in browser passed
+save, immediate selection, blank-key retention, clear, local configuration check
+and reload checks. A 390px viewport had no horizontal overflow. Synthetic keys
+and test tasks were removed. All 5 account rows and 29 historical task rows were
+preserved, and deployed web assets match the GitHub commit.
+
 ## Offline deployment
 
 Build with `docker build --build-arg INSTALL_OFFLINE_ASR=1 ...`. Provision
