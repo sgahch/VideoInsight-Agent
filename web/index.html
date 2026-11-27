@@ -166,6 +166,11 @@
 
       <!-- 核心分析工作台 Grid (移动端自动折叠为单列) -->
       <section id="workspace" class="workspace-grid" aria-label="新建任务">
+        <div class="card-panel" style="grid-column:1/-1">
+          <label for="asrProvider">语音转写服务</label>
+          <select id="asrProvider" class="form-input"><option value="">服务器默认服务</option></select>
+          <p class="input-hint">音频仅发送给所选服务，失败不会自动换服务商。纯文本服务不提供时间戳与字幕时间轴；离线 Whisper 不向外部服务上传音频。</p>
+        </div>
         <!-- 上传卡片 -->
         <div class="card-panel">
           <div class="card-header">
@@ -321,6 +326,8 @@
           <div class="media-actions">
             <a id="mediaDownloadMain" class="download-link" href="#">下载</a>
             <a id="mediaDownloadAudio" class="download-link" href="#" hidden>下载音频（转写用）</a>
+            <a id="subtitleSrt" class="download-link" href="#" hidden>下载 SRT 字幕</a>
+            <a id="subtitleVtt" class="download-link" href="#" hidden>下载 VTT 字幕</a>
             <span id="mediaHint" class="media-hint" hidden></span>
           </div>
         </div>
@@ -580,11 +587,11 @@
   </div>
 
   <script src="/static/comment-utils.js?v=20261105"></script>
-  <script src="/static/queue.js?v=20261127-retry-search1"></script>
+  <script src="/static/queue.js?v=20261127-multi-asr1"></script>
   <script src="/static/local-login.js?v=20261116-helper101"></script>
   <script src="/static/client-identity.js?v=20261127"></script>
   <script src="/static/resumable-upload.js?v=20261126-upload1"></script>
-  <script src="/static/app.js?v=20261127-account-identity1"></script>
+  <script src="/static/app.js?v=20261127-multi-asr1"></script>
 </body>
 
 </html>

@@ -328,7 +328,8 @@ def public_model_config() -> dict[str, object]:
     """Authenticated UI configuration; credentials never leave the server."""
     provider = settings.llm_provider.lower()
     key = settings.deepseek_api_key if provider == "deepseek" else settings.openai_api_key if provider == "openai" else settings.deepseek_api_key or settings.openai_api_key
-    return {"llm": {"configured": bool(key) and provider != "mock", "provider": provider, "base_url": settings.llm_base_url, "model": settings.llm_model, "protocol": settings.llm_protocol}}
+    from app.adapters.multi_asr import provider_catalog
+    return {"asr": {"default": settings.asr_provider, "providers": provider_catalog(settings)}, "llm": {"configured": bool(key) and provider != "mock", "provider": provider, "base_url": settings.llm_base_url, "model": settings.llm_model, "protocol": settings.llm_protocol}}
 
 
 @app.post("/parse-link")
@@ -382,6 +383,8 @@ def submit_file_analysis(
     file: UploadFile = File(...),
     mode: AnalysisMode = Form(AnalysisMode.summary),
     use_mock: bool | None = Form(None),
+    asr_provider: str | None = Form(None),
+    asr_require_timestamps: bool = Form(True),
     llm_provider: str | None = Form(None),
     llm_base_url: str | None = Form(None),
     llm_model: str | None = Form(None),
@@ -390,6 +393,7 @@ def submit_file_analysis(
     x_client_id: str | None = Header(default=None, description="客户端身份标识（浏览器持久化 UUID）"),
 ) -> AnalyzeResponse:
     request = AnalyzeRequest(
+        asr_provider=asr_provider, asr_require_timestamps=asr_require_timestamps,
         url=f"upload://{file.filename or 'uploaded-media'}",
         label=file.filename,
         mode=mode,
@@ -644,7 +648,7 @@ def queue_overview(
         "counts": task_store.status_counts(client_id),
         "tasks": [task.model_dump(mode="json") for task in tasks],
         "engine": {
-            "asr": "cloud",
+            "asr": "local" if settings.asr_provider == "faster_whisper" else "cloud",
             "asr_provider": settings.asr_provider,
             "asr_model": settings.asr_model,
             "asr_global_workers": settings.asr_global_workers,
@@ -864,6 +868,20 @@ def _remove_task_files(task_id: str) -> None:
     共用同一份"什么算产物"的定义，避免两处规则漂移。
     """
     remove_task_artifacts(settings, task_id)
+
+
+@app.get("/tasks/{task_id}/subtitles")
+def export_subtitles(task_id: str, format: Literal["srt", "vtt"] = "srt",
+                     x_client_id: str | None = Header(default=None),
+                     client_cookie: str | None = Cookie(default=None, alias=CLIENT_COOKIE_NAME)) -> Response:
+    from app.subtitles import render_subtitles
+    task = _owned_task(task_id, _client_id_from_media_request(x_client_id, client_cookie))
+    if task.result is None or not task.result.diagnostics.get("asr_timestamps", True):
+        raise HTTPException(409, "此任务没有真实时间戳，无法导出字幕。")
+    try: content = render_subtitles(task.result.segments, format)
+    except ValueError: raise HTTPException(409, "此任务没有有效字幕时间轴。") from None
+    return Response(content, media_type="text/vtt" if format == "vtt" else "application/x-subrip",
+                    headers={"Content-Disposition": f'attachment; filename="{task_id}.{format}"'})
 
 
 @app.get("/tasks/{task_id}/media")

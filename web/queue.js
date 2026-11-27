@@ -251,7 +251,7 @@
         $("poolActive").textContent = pool.active_workers;
         $("poolWaiting").textContent = `${pool.queued} / ${pool.queue_capacity}`;
         $("poolAsr").textContent = data.engine.asr_global_workers;
-        $("queueEngine").textContent = "转写 · 云端 / 总结 · API";
+        $("queueEngine").textContent = data.engine.asr_provider === "faster_whisper" ? "转写 · 服务器离线 CPU / 总结 · API" : "转写 · 云端 / 总结 · API";
         const slots = [];
         for (let index = 0; index < Math.min(pool.max_workers, 24); index++) {
           const busy = index < pool.active_workers;

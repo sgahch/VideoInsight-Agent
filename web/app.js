@@ -1020,6 +1020,13 @@
 
   /** 渲染媒体播放器与下载链接（仅在任务成功后展示）。 */
   function renderMedia(task) {
+    for (const [id, format] of [["subtitleSrt", "srt"], ["subtitleVtt", "vtt"]]) {
+      const link = document.getElementById(id);
+      if (link) {
+        link.hidden = !task.result?.segments?.length || task.result?.diagnostics?.asr_timestamps === false;
+        link.href = `/tasks/${encodeURIComponent(task.task_id)}/subtitles?format=${format}`;
+      }
+    }
     els.mediaPanel.hidden = true;
     els.mediaVideo.hidden = true;
     els.mediaAudio.hidden = true;
@@ -1412,7 +1419,7 @@
     setUploadBusy(true);
     els.uploadResumeHint.hidden = true;
     try {
-      const data = await getUploadClient().upload(file, { mode, use_mock: useMock, ...llmPayload });
+      const data = await getUploadClient().upload(file, { mode, use_mock: useMock, ...asrPayload(), ...llmPayload });
       if (!data) return;
       els.taskSource.textContent = file.name;
       await queueView.onSubmitted(data.task_id);
@@ -1430,7 +1437,27 @@
     }
   }
 
-  async function startLinkAnalysis({ url, mode, useMock, label }, automaticRetry = false) {
+  function asrPayload() {
+    const provider = document.getElementById("asrProvider")?.value;
+    return provider ? { asr_provider: provider, asr_require_timestamps: provider !== "siliconflow" } : {};
+  }
+
+  function renderAsrProviders(config) {
+    const select = document.getElementById("asrProvider");
+    if (!select || !config) return;
+    const names = { faster_whisper: "离线 Whisper · 时间戳 · 无 API 费用", siliconflow: "硅基流动 SenseVoice · 仅纯文本", cloudflare: "Cloudflare Whisper · 时间戳 · 需验证免费计划", groq: "Groq Whisper · 时间戳" };
+    select.replaceChildren();
+    for (const item of config.providers) {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = (names[item.id] || item.id) + (item.configured ? "" : "（未配置）");
+      option.disabled = !item.configured;
+      select.appendChild(option);
+    }
+    select.value = config.default;
+  }
+
+  async function startLinkAnalysis({ url, mode, useMock, label, asrProvider = null, requireTimestamps = true }, automaticRetry = false) {
     if (!identityResolved) return;
     if (!url) {
       setTaskStatus("failed", "请输入视频链接。");
@@ -1446,7 +1473,7 @@
     els.linkSubmit.disabled = true;
     els.linkSubmit.textContent = automaticRetry ? "登录成功，正在重试..." : "提交中...";
     try {
-      const body = Object.assign({ url: url, mode: mode, use_mock: useMock }, llmPayload);
+      const body = Object.assign({ url: url, mode: mode, use_mock: useMock }, asrProvider ? { asr_provider: asrProvider, asr_require_timestamps: requireTimestamps } : asrPayload(), llmPayload);
       if (label) {
         body.label = label;
       }
@@ -3003,6 +3030,8 @@
         mode: task.request.mode,
         useMock: task.request.use_mock,
         label: task.request.label,
+        asrProvider: task.request.asr_provider,
+        requireTimestamps: task.request.asr_require_timestamps !== false,
       }),
     });
     queueView.prepare();
@@ -3013,6 +3042,7 @@
     queueView.start();
     try {
       const config = await fetchJson("/config");
+      renderAsrProviders(config.asr);
       if (identityResolved && config.llm.configured) {
         serverModelConfig = { provider: config.llm.provider, baseUrl: config.llm.base_url, model: config.llm.model, protocol: config.llm.protocol };
         els.llmApiKey.placeholder = "留空使用服务器默认模型";

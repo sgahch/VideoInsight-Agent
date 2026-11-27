@@ -111,12 +111,17 @@ def select_transcriber(
     if use_mock:
         return MockTranscriber()
     provider = settings.asr_provider.strip().lower()
+    if settings.asr_free_only and (provider == "paraformer" or (provider == "groq" and not settings.groq_free_tier_confirmed)):
+        raise ExternalDependencyError("严格免费模式禁止收费 ASR 或未确认免费计划的 Groq；请选择离线 Whisper 或已验证免费服务。")
     if provider == "paraformer":
         return ParaformerTranscriber(settings)
     if provider == "groq":
         from app.adapters.groq_asr import GroqTranscriber
 
         return GroqTranscriber(settings)
+    if provider in ("siliconflow", "cloudflare", "faster_whisper"):
+        from app.adapters.multi_asr import UnifiedTranscriber
+        return UnifiedTranscriber(settings)
     raise ExternalDependencyError("ASR_PROVIDER 配置无效，仅支持 paraformer 或 groq。")
 
 

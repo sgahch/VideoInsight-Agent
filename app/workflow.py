@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import traceback
+from dataclasses import replace
 from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
@@ -296,6 +297,8 @@ def analyze(
     *,
     on_update: Callable[[AnalysisResult], None] | None = None,
 ) -> AnalysisResult:
+    if request.asr_provider:
+        runtime_settings = replace(runtime_settings, asr_provider=request.asr_provider, asr_require_timestamps=request.asr_require_timestamps)
     runtime_settings.ensure_dirs()
     use_mock = runtime_settings.mock_mode if request.use_mock is None else request.use_mock
     t0 = perf_counter()
@@ -338,7 +341,7 @@ def analyze(
     if reporter is not None:
         reporter.mark_transcribe_done(transcribe_seconds, media_duration)
     _discard_transcode_intermediate(media.audio_path, task_id)
-    transcript = format_transcript(segments, include_timestamps=True)
+    transcript = format_transcript(segments, include_timestamps=getattr(transcriber, "timestamps", True))
     transcript_plain = format_transcript(segments, include_timestamps=False)
     metadata = _build_metadata(
         title=media.title,
@@ -359,7 +362,7 @@ def analyze(
     result = AnalysisResult(
         mode=request.mode,
         transcript=transcript,
-        segments=segments,
+        segments=segments if getattr(transcriber, "timestamps", True) else [],
         output="",
         media=media_info,
         comments=comments or None,
@@ -367,6 +370,7 @@ def analyze(
             "mock_mode": use_mock,
             "asr_provider": "mock" if use_mock else runtime_settings.asr_provider,
             "asr_model": "mock" if use_mock else runtime_settings.asr_model,
+            "asr_timestamps": getattr(transcriber, "timestamps", True),
             "comments_source": comments_source,
             "comment_job_id": comment_job_id,
             "comment_count": len(comments),
@@ -402,6 +406,8 @@ def analyze_media_file(
     *,
     on_update: Callable[[AnalysisResult], None] | None = None,
 ) -> AnalysisResult:
+    if request.asr_provider:
+        runtime_settings = replace(runtime_settings, asr_provider=request.asr_provider, asr_require_timestamps=request.asr_require_timestamps)
     runtime_settings.ensure_dirs()
     use_mock = runtime_settings.mock_mode if request.use_mock is None else request.use_mock
     t0 = perf_counter()
@@ -430,7 +436,7 @@ def analyze_media_file(
     if reporter is not None:
         reporter.mark_transcribe_done(transcribe_seconds, media_duration)
     _discard_transcode_intermediate(media_path, task_id)
-    transcript = format_transcript(segments, include_timestamps=True)
+    transcript = format_transcript(segments, include_timestamps=getattr(transcriber, "timestamps", True))
     transcript_plain = format_transcript(segments, include_timestamps=False)
     metadata = _build_metadata(
         title=media_path.name,
@@ -450,13 +456,14 @@ def analyze_media_file(
     result = AnalysisResult(
         mode=request.mode,
         transcript=transcript,
-        segments=segments,
+        segments=segments if getattr(transcriber, "timestamps", True) else [],
         output="",
         media=media_info,
         diagnostics={
             "mock_mode": use_mock,
             "asr_provider": "mock" if use_mock else runtime_settings.asr_provider,
             "asr_model": "mock" if use_mock else runtime_settings.asr_model,
+            "asr_timestamps": getattr(transcriber, "timestamps", True),
             "source": "upload",
             "media_duration_seconds": round(media_duration, 2) if media_duration is not None else None,
             "transcribe_seconds": round(transcribe_seconds, 2),

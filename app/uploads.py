@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 from uuid import uuid4
+from typing import Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -34,6 +35,8 @@ class UploadInit(BaseModel):
 
 
 class UploadOptions(BaseModel):
+    asr_provider: Literal["groq", "siliconflow", "cloudflare", "faster_whisper"] | None = None
+    asr_require_timestamps: bool = True
     mode: AnalysisMode = AnalysisMode.summary
     use_mock: bool | None = None
     llm_provider: str | None = None

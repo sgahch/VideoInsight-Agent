@@ -4,9 +4,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
 RUN groupadd --gid 10001 videoinsight \
     && useradd --uid 10001 --gid videoinsight --no-create-home videoinsight
-COPY requirements.txt requirements-asr.txt constraints-security.txt ./
+ARG INSTALL_OFFLINE_ASR=0
+COPY requirements.txt requirements-asr.txt requirements-offline.txt constraints-security.txt ./
 RUN python -m pip install --upgrade "pip>=26.2" \
     && python -m pip install -r requirements-asr.txt
+RUN if [ "$INSTALL_OFFLINE_ASR" = "1" ]; then python -m pip install -r requirements-offline.txt; fi
 RUN python -c "import imageio_ffmpeg, os; os.symlink(imageio_ffmpeg.get_ffmpeg_exe(), '/usr/local/bin/ffmpeg')"
 COPY app ./app
 COPY web ./web
