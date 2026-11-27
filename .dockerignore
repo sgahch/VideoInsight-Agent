@@ -13,4 +13,5 @@ __pycache__
 *.txt
 !requirements.txt
 !requirements-asr.txt
+!requirements-offline.txt
 !constraints-security.txt

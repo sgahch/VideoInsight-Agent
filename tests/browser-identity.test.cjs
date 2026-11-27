@@ -106,7 +106,7 @@ function page({ records = new Map(), account, storageFailure, handler = () => nu
     const app = source("app.js");
     assert.ok(app.includes(entry));
     vm.runInContext(app.replace(entry, [
-      "  window.testApi = { startLinkAnalysis, sendChat, submitUpload, startPolling, state };",
+      "  window.testApi = { startLinkAnalysis, sendChat, submitUpload, startPolling, state, retryAsrChoice, retryPendingCookieTask };",
       "  window.ready = boot();",
     ].join("\n")), context);
     ready = context.ready;
@@ -115,6 +115,21 @@ function page({ records = new Map(), account, storageFailure, handler = () => nu
 }
 
 const link = { url: "https://video.example.test/1", mode: "summary", useMock: false };
+
+test('ordinary and cookie-login retries retain the original ASR destination', async () => {
+  const browser = page({ account: ACCOUNT_A });
+  await browser.ready;
+  browser.node('asrProvider').value = 'siliconflow';
+  const previous = { request: { asr_provider: 'faster_whisper', asr_require_timestamps: true } };
+  const choice = browser.context.testApi.retryAsrChoice(previous);
+  assert.equal(choice.asrProvider, 'faster_whisper');
+  await browser.context.testApi.startLinkAnalysis({ ...link, mode: 'transcript', ...choice });
+  browser.context.testApi.state.pendingCookieRetry = { ...link, mode: 'transcript', ...choice };
+  await browser.context.testApi.retryPendingCookieTask();
+  const bodies = browser.requests.filter(r => r.path === '/analyze').map(r => JSON.parse(r.body));
+  assert.equal(bodies.length, 2);
+  assert.ok(bodies.every(b => b.asr_provider === 'faster_whisper' && b.asr_require_timestamps === true));
+});
 const analyzeBody = (browser) => JSON.parse(browser.requests.find(({ path }) => path === "/analyze").body);
 const chatBody = (browser) => JSON.parse(browser.requests.find(({ path }) => path.endsWith("/chat/stream")).body);
 const chooseTask = (browser) => {

@@ -93,3 +93,24 @@ def test_strict_free_mode_blocks_legacy_paid_or_unverified_cloud():
     for provider in ['paraformer','groq']:
         with pytest.raises(ExternalDependencyError,match='免费'):
             select_transcriber(replace(Settings(),asr_provider=provider,asr_free_only=True,groq_free_tier_confirmed=False),False)
+
+def test_default_provider_is_pinned_before_later_config_changes():
+    from app.adapters.multi_asr import pin_provider
+    from app.schemas import AnalyzeRequest
+    request=AnalyzeRequest(url='upload://speech.wav')
+    first=pin_provider(request,replace(Settings(),asr_provider='faster_whisper'))
+    assert first.asr_provider=='faster_whisper' and request.asr_provider is None
+    assert pin_provider(first,replace(Settings(),asr_provider='siliconflow')).asr_provider=='faster_whisper'
+
+def test_semaphore_wait_is_subtracted_from_process_timeout(tmp_path,monkeypatch):
+    import app.adapters.multi_asr as module
+    from types import SimpleNamespace
+    times=iter([0.0,9.0])
+    monkeypatch.setattr(module,'monotonic',lambda:next(times))
+    monkeypatch.setattr(module,'_LOCAL_GATE',SimpleNamespace(acquire=lambda **kwargs:True,release=lambda:None))
+    def run(*args,**kwargs):
+        assert kwargs['timeout']==1.0
+        return SimpleNamespace(returncode=0,stdout=b'{"segments":[]}')
+    monkeypatch.setattr(module.subprocess,'run',run)
+    e=engine(tmp_path,'faster_whisper',lambda r:pytest.fail('cloud request'))
+    e._recognize(None,audio(tmp_path),10)

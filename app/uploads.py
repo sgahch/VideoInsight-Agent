@@ -249,6 +249,8 @@ class UploadStore:
                     url=f"upload://{row['filename']}", label=row["filename"], client_id=owner,
                     **options.model_dump(),
                 )
+                from app.adapters.multi_asr import pin_provider
+                request = pin_provider(request, self.settings)
                 task = store.create(request, task_id=upload_id)
                 try:
                     enqueue(task, target)

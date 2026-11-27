@@ -330,9 +330,11 @@ def test_user_session_tampering_and_password_changes_invalidate_login(setup):
     client, sent, config = setup
     signup(client, sent)
     value = client.cookies[accounts.SESSION_COOKIE_NAME]
-    client.cookies.set(accounts.SESSION_COOKIE_NAME, value[:-1] + ("a" if value[-1] != "a" else "b"))
+    cookie = next(c for c in client.cookies.jar if c.name == accounts.SESSION_COOKIE_NAME)
+    scope = {"domain": cookie.domain, "path": cookie.path}
+    client.cookies.set(accounts.SESSION_COOKIE_NAME, value[:-1] + ("a" if value[-1] != "a" else "b"), **scope)
     assert client.get("/tasks").status_code == 401
-    client.cookies.set(accounts.SESSION_COOKIE_NAME, value)
+    client.cookies.set(accounts.SESSION_COOKIE_NAME, value, **scope)
     assert client.get("/tasks").status_code == 200
     with sqlite3.connect(config.db_path) as connection:
         connection.execute("UPDATE auth_users SET password_hash=?", (accounts.hash_password("changed-password"),))

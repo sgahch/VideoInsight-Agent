@@ -11,3 +11,10 @@ def test_srt_vtt_preserve_fractional_timing_and_order():
 def test_empty_or_invalid_segments_are_not_fake_subtitles():
     for rows in [[],[TranscriptSegment(start=3,end=2,text='invalid')]]:
         with pytest.raises(ValueError):render_subtitles(rows,'srt')
+
+def test_subtitles_missing_or_other_owner_returns_404(monkeypatch):
+    import app.main as main
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(main,'_owned_task',lambda *args:None)
+    response=TestClient(main.app,raise_server_exceptions=False).get('/tasks/missing/subtitles')
+    assert response.status_code==404

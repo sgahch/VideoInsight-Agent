@@ -49,6 +49,13 @@ CAPABILITIES = {p.id: p for p in [Capability("siliconflow", False, True),
     Capability("cloudflare", True, True), Capability("faster_whisper", True, False), Capability("groq", True, True)]}
 
 
+def pin_provider(request, settings):
+    """Persist the destination before queuing, independently of later defaults."""
+    if request.asr_provider is None and settings.asr_provider in CAPABILITIES:
+        return request.model_copy(update={"asr_provider": settings.asr_provider})
+    return request
+
+
 def provider_catalog(settings: Settings) -> list[dict]:
     ready = {"siliconflow": bool(settings.siliconflow_api_key) and settings.siliconflow_asr_model == SF_MODEL,
              "cloudflare": bool(settings.cloudflare_api_token and re.fullmatch(r"[a-f0-9]{32}", settings.cloudflare_account_id)),
@@ -151,8 +158,11 @@ class UnifiedTranscriber:
 
     def _recognize(self, client, chunk, timeout):
         if self.provider == "faster_whisper":
+            started = monotonic()
             if not _LOCAL_GATE.acquire(timeout=timeout): raise ProviderError("capacity", "离线转写繁忙")
             try:
+                timeout -= monotonic() - started
+                if timeout <= 0: raise ProviderError("timeout", "离线识别等待超时")
                 env = dict(os.environ, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
                 try:
                     result = subprocess.run([sys.executable, "-m", "app.adapters.whisper_worker", self.settings.faster_whisper_model_path, str(chunk)],

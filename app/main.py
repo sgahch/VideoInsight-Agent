@@ -365,6 +365,8 @@ def submit_analysis(
             request.url = canonical_media_url(request.url)
         except UnsafeURL as exc:
             raise HTTPException(400, str(exc)) from exc
+    from app.adapters.multi_asr import pin_provider
+    request = pin_provider(request, settings)
     task = task_store.create(request)
     try:
         task_queue.submit(task.task_id, task_store, run_analysis_task, task.task_id, request, task_store)
@@ -405,6 +407,8 @@ def submit_file_analysis(
         llm_api_key=llm_api_key,
         llm_protocol=llm_protocol,
     )
+    from app.adapters.multi_asr import pin_provider
+    request = pin_provider(request, settings)
     task = task_store.create(request)
     try:
         media_path = _save_upload(file, task.task_id)
@@ -876,6 +880,8 @@ def export_subtitles(task_id: str, format: Literal["srt", "vtt"] = "srt",
                      client_cookie: str | None = Cookie(default=None, alias=CLIENT_COOKIE_NAME)) -> Response:
     from app.subtitles import render_subtitles
     task = _owned_task(task_id, _client_id_from_media_request(x_client_id, client_cookie))
+    if task is None:
+        raise HTTPException(404, "Task not found")
     if task.result is None or not task.result.diagnostics.get("asr_timestamps", True):
         raise HTTPException(409, "此任务没有真实时间戳，无法导出字幕。")
     try: content = render_subtitles(task.result.segments, format)

@@ -972,6 +972,8 @@
           url: String(task.request.url || ""),
           mode: task.request.mode || "summary",
           useMock: Boolean(task.request.use_mock),
+          label: task.request.label,
+          ...retryAsrChoice(task),
         };
         setCookieMessage(
           ["desktop", "remote"].includes(state.cookieAuthorization?.mode)
@@ -1435,6 +1437,12 @@
       syncAnalysisModeUi();
       renderUploadResumeHint();
     }
+  }
+
+  function retryAsrChoice(task) {
+    const previous = task.request?.asr_provider || task.result?.diagnostics?.asr_provider;
+    const provider = ["groq", "cloudflare", "siliconflow", "faster_whisper"].includes(previous) ? previous : "faster_whisper";
+    return { asrProvider: provider, requireTimestamps: task.request?.asr_require_timestamps !== false };
   }
 
   function asrPayload() {
@@ -3030,8 +3038,7 @@
         mode: task.request.mode,
         useMock: task.request.use_mock,
         label: task.request.label,
-        asrProvider: task.request.asr_provider,
-        requireTimestamps: task.request.asr_require_timestamps !== false,
+        ...retryAsrChoice(task),
       }),
     });
     queueView.prepare();
