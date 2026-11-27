@@ -975,3 +975,43 @@ Private backup:
 `/opt/videoinsight/backups/20261127-local-helper-1fc8544-reliability`.
 Committed source, release Dockerfile, verification scripts and manifest:
 `/opt/videoinsight/releases/1fc8544`.
+
+## 2026-11-27: Retry History Search Fix
+
+`videoinsight:92889b2` replaces `videoinsight:1fc8544`. The code was pushed
+to GitHub before deployment. Retrying could trigger credential autofill in
+the task search field; its input listener then filtered the history by the
+account email. The search now has its own form with autofill disabled and
+accepts query changes only during focused editing. Polling reconciles silent
+autofill without replacing the user's intentional query. Search submission
+does not navigate, and the queue assets have new cache versions.
+
+All 34 Node tests passed, including three new regressions that failed before
+the fix. An isolated Ego browser test clicked the actual retry control while
+injecting an unfocused autofill event: both original tasks stayed visible
+during submission, and the new mock task appeared without a page refresh.
+Search and Enter submission passed. The 320px and 390px layouts had no
+horizontal overflow. Production checks passed for certificate-verified HTTPS,
+authentication, queue responses, deployed file hashes, and resumable uploads.
+All five existing account rows and 26 historical task rows were preserved.
+
+The Groq route remains unavailable. Direct authenticated model listing
+returned 403; the configured proxy's upstream TCP connection timed out.
+Refreshing the locally configured subscription did not provide a working
+route from this server. One candidate accepted TCP and TLS to the node but
+failed to proxy either Groq or a separate diagnostic destination. The isolated
+candidate container and private test configuration were removed. Production
+proxy configuration, Groq credentials and provider selection were unchanged.
+
+The subscription response reported 293 GiB remaining out of 300 GiB, expiring
+at 2026-12-21 10:47:08 +08:00. Its node account credential matched production.
+These observations do not indicate subscription expiry or exhausted traffic;
+the provider route needs repair or replacement. No paid-provider fallback
+or automatic re-upload of historical tasks was enabled.
+
+Rollback container:
+`videoinsight-before-local-helper-92889b2-retryfix` (stopped, restart disabled).
+Private backup:
+`/opt/videoinsight/backups/20261127-local-helper-92889b2-retryfix`.
+Committed source and release manifest:
+`/opt/videoinsight/releases/92889b2`.
