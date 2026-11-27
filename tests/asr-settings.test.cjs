@@ -61,3 +61,15 @@ test("provider change discards unsaved secrets; clear touches only selected prov
   assert.equal(calls[0][0], "/asr/settings/cloudflare");
   assert.equal(calls[0][1].method, "DELETE");
 });
+
+test("paid and fallback authorization are explicit and reset when changing account", async () => {
+  const calls=[];const v=view(async(...args)=>{calls.push(args);return config();});
+  v.el('asrSettingsProvider').value='siliconflow_qwen';v.el('asrSettingsProvider').events.change();
+  assert.equal(v.el('asrPaidGroup').hidden,false);
+  assert.equal(v.el('asrPaidAuthorized').checked,false);
+  v.el('asrPaidAuthorized').checked=true;v.el('asrFallbackAuthorized').checked=true;
+  await v.submit();
+  const body=JSON.parse(calls[0][1].body);
+  assert.equal(body.paid_authorized,true);assert.equal(body.fallback_authorized,true);
+  v.app.reset();assert.equal(v.el('asrPaidAuthorized').checked,false);assert.equal(v.el('asrFallbackAuthorized').checked,false);
+});

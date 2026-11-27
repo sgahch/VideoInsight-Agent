@@ -297,10 +297,8 @@ def analyze(
     *,
     on_update: Callable[[AnalysisResult], None] | None = None,
 ) -> AnalysisResult:
-    from app.asr_settings import effective_settings
-    runtime_settings = effective_settings(runtime_settings, request.client_id)
-    if request.asr_provider:
-        runtime_settings = replace(runtime_settings, asr_provider=request.asr_provider, asr_require_timestamps=request.asr_require_timestamps)
+    from app.asr_settings import task_settings
+    runtime_settings = task_settings(runtime_settings, request)
     runtime_settings.ensure_dirs()
     use_mock = runtime_settings.mock_mode if request.use_mock is None else request.use_mock
     t0 = perf_counter()
@@ -373,6 +371,7 @@ def analyze(
             "asr_provider": "mock" if use_mock else runtime_settings.asr_provider,
             "asr_model": "mock" if use_mock else runtime_settings.asr_model,
             "asr_timestamps": getattr(transcriber, "timestamps", True),
+            **getattr(transcriber, "diagnostics", {}),
             "comments_source": comments_source,
             "comment_job_id": comment_job_id,
             "comment_count": len(comments),
@@ -408,10 +407,8 @@ def analyze_media_file(
     *,
     on_update: Callable[[AnalysisResult], None] | None = None,
 ) -> AnalysisResult:
-    from app.asr_settings import effective_settings
-    runtime_settings = effective_settings(runtime_settings, request.client_id)
-    if request.asr_provider:
-        runtime_settings = replace(runtime_settings, asr_provider=request.asr_provider, asr_require_timestamps=request.asr_require_timestamps)
+    from app.asr_settings import task_settings
+    runtime_settings = task_settings(runtime_settings, request)
     runtime_settings.ensure_dirs()
     use_mock = runtime_settings.mock_mode if request.use_mock is None else request.use_mock
     t0 = perf_counter()
@@ -468,6 +465,7 @@ def analyze_media_file(
             "asr_provider": "mock" if use_mock else runtime_settings.asr_provider,
             "asr_model": "mock" if use_mock else runtime_settings.asr_model,
             "asr_timestamps": getattr(transcriber, "timestamps", True),
+            **getattr(transcriber, "diagnostics", {}),
             "source": "upload",
             "media_duration_seconds": round(media_duration, 2) if media_duration is not None else None,
             "transcribe_seconds": round(transcribe_seconds, 2),

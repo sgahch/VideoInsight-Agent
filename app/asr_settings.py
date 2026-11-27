@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from app.config import Settings
 from app.errors import WorkflowError
 
-PROVIDERS = ('siliconflow', 'cloudflare', 'groq', 'faster_whisper')
+PROVIDERS = ('siliconflow', 'siliconflow_qwen', 'cloudflare', 'groq', 'faster_whisper')
 _LOCK = threading.RLock()
 
 
@@ -25,6 +25,8 @@ class SettingsUpdate(BaseModel):
     api_token: SecretStr | None = None
     account_id: str | None = Field(default=None, pattern=r'^(?:[a-f0-9]{32})?$')
     free_tier_confirmed: bool | None = None
+    paid_authorized: bool | None = None
+    fallback_authorized: bool | None = None
     timeout_seconds: int | None = Field(default=None, ge=5, le=600)
     make_default: bool = False
 
@@ -72,11 +74,17 @@ def _write(settings: Settings, owner: str | None, data: dict):
         temporary.unlink(missing_ok=True)
 
 
-def _apply(settings: Settings, profile: dict) -> Settings:
+def _apply(settings: Settings, profile: dict, owner: str | None = None) -> Settings:
     values = profile.get('providers', {})
     updates = {'asr_free_only': True} if profile else {}
+    if owner and owner.startswith('account:'):
+        updates.update(qwen_asr_api_key=None, qwen_asr_authorized=False, qwen_fallback_authorized=False)
     sf, cf, groq = [values.get(p, {}) for p in ('siliconflow', 'cloudflare', 'groq')]
     if sf.get('api_key'): updates['siliconflow_api_key'] = sf['api_key']
+    qwen = values.get('siliconflow_qwen', {})
+    if qwen.get('api_key'): updates['qwen_asr_api_key'] = qwen['api_key']
+    if 'paid_authorized' in qwen: updates['qwen_asr_authorized'] = qwen['paid_authorized']
+    if 'fallback_authorized' in qwen: updates['qwen_fallback_authorized'] = qwen['fallback_authorized']
     if cf.get('api_token'): updates['cloudflare_api_token'] = cf['api_token']
     if cf.get('account_id'): updates['cloudflare_account_id'] = cf['account_id']
     if groq.get('api_key'):
@@ -90,13 +98,13 @@ def _apply(settings: Settings, profile: dict) -> Settings:
 def effective_settings(settings: Settings, owner: str | None) -> Settings:
     # Legacy unowned/local jobs continue using server configuration.
     if owner is None and not settings.auth_password_hash: return settings
-    return _apply(settings, _read(settings, owner))
+    return _apply(settings, _read(settings, owner), owner)
 
 
 def public_settings(settings: Settings, owner: str | None) -> dict:
     from app.adapters.multi_asr import provider_catalog
     profile = _read(settings, owner)
-    effective = _apply(settings, profile)
+    effective = _apply(settings, profile, owner)
     owned = profile.get('providers', {})
     fields = {}
     for p in PROVIDERS:
@@ -105,6 +113,8 @@ def public_settings(settings: Settings, owner: str | None) -> dict:
                      'source': 'account' if value.get('api_key') or value.get('api_token') else 'server',
                      'account_id': value.get('account_id', ''),
                      'free_tier_confirmed': value.get('free_tier_confirmed', False)}
+        if p == 'siliconflow_qwen':
+            fields[p].update(paid_authorized=effective.qwen_asr_authorized, fallback_authorized=effective.qwen_fallback_authorized)
     return {'default': effective.asr_provider, 'providers': provider_catalog(effective),
             'timeout_seconds': effective.asr_timeout_seconds, 'fields': fields}
 
@@ -114,7 +124,7 @@ def save_settings(settings: Settings, owner: str | None, provider: str, payload:
     with _LOCK:
         profile = _read(settings, owner)
         value = profile.setdefault('providers', {}).setdefault(provider, {})
-        for name, allowed in [('api_key', provider in ('siliconflow','groq')), ('api_token', provider=='cloudflare')]:
+        for name, allowed in [('api_key', provider in ('siliconflow','siliconflow_qwen','groq')), ('api_token', provider=='cloudflare')]:
             secret = getattr(payload, name)
             if secret and secret.get_secret_value().strip():
                 raw = secret.get_secret_value().strip()
@@ -125,10 +135,15 @@ def save_settings(settings: Settings, owner: str | None, provider: str, payload:
             value['account_id'] = payload.account_id
         if provider=='groq' and payload.free_tier_confirmed is not None:
             value['free_tier_confirmed'] = payload.free_tier_confirmed
+        if provider=='siliconflow_qwen':
+            for name in ('paid_authorized','fallback_authorized'):
+                if getattr(payload,name) is not None:value[name]=getattr(payload,name)
         if payload.timeout_seconds is not None: profile['timeout_seconds'] = payload.timeout_seconds
-        if payload.make_default:
+        if provider=='siliconflow_qwen' and payload.paid_authorized is False:
+            if payload.make_default or profile.get('default')==provider:profile['default']='faster_whisper'
+        elif payload.make_default:
             from app.adapters.multi_asr import provider_catalog
-            if not next(p for p in provider_catalog(_apply(settings, profile)) if p['id']==provider)['configured']:
+            if not next(p for p in provider_catalog(_apply(settings, profile, owner)) if p['id']==provider)['configured']:
                 raise ValueError('该服务尚未配置完整或未确认免费计划，不能设为默认。')
             profile['default'] = provider
         _write(settings, owner, profile)
@@ -160,6 +175,14 @@ def check_settings(settings: Settings, owner: str | None, provider: str) -> dict
                 except httpx.TimeoutException: raise ProviderError('timeout','Groq 连接超时') from None
                 except httpx.RequestError: raise ProviderError('network','Groq 网络连接失败') from None
                 if response.status_code!=200: raise ProviderError('access',f'Groq HTTP {response.status_code}')
+        elif provider=='siliconflow_qwen':
+            from app.adapters.paid_asr import PaidQwenTranscriber,QWEN_MODEL
+            adapter=PaidQwenTranscriber(cfg);adapter.check_config()
+            with adapter._client() as client:
+                response=adapter._request(client,'GET','https://api.siliconflow.cn/v1/models',headers={'Authorization':'Bearer '+cfg.qwen_asr_api_key})
+                try:available=any(item.get('id')==QWEN_MODEL for item in response.json()['data'])
+                except (ValueError,TypeError,KeyError):available=False
+                if not available:raise ProviderError('configuration','本账号未列出 Qwen ASR 模型')
         else:
             transcriber = UnifiedTranscriber(cfg)
             with transcriber._client() as client:
@@ -170,3 +193,18 @@ def check_settings(settings: Settings, owner: str | None, provider: str) -> dict
         return {'ok':True,'audio_uploaded':False,'message':'凭据/配置检查通过，未上传音频；真实识别请通过新建任务验证。'}
     except ProviderError as error:
         return {'ok':False,'audio_uploaded':False,'category':error.category,'message':str(error)}
+
+
+def task_settings(settings: Settings, request) -> Settings:
+    cfg=effective_settings(settings,request.client_id)
+    if request.asr_provider:
+        cfg=replace(cfg,asr_provider=request.asr_provider,asr_require_timestamps=request.asr_require_timestamps)
+    if cfg.asr_provider=='siliconflow_qwen':
+        def live_authorization():
+            current=effective_settings(settings,request.client_id)
+            return (current.qwen_asr_authorized and request.asr_paid_authorized is True,
+                    current.qwen_fallback_authorized and request.asr_fallback_authorized is True)
+        cfg=replace(cfg,qwen_asr_authorized=cfg.qwen_asr_authorized and request.asr_paid_authorized is True,
+                    qwen_fallback_authorized=cfg.qwen_fallback_authorized and request.asr_fallback_authorized is True,
+                    asr_authorization_check=live_authorization)
+    return cfg

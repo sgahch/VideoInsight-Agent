@@ -35,8 +35,10 @@ class UploadInit(BaseModel):
 
 
 class UploadOptions(BaseModel):
-    asr_provider: Literal["groq", "siliconflow", "cloudflare", "faster_whisper"] | None = None
+    asr_provider: Literal["groq", "siliconflow", "siliconflow_qwen", "cloudflare", "faster_whisper"] | None = None
     asr_require_timestamps: bool = True
+    asr_paid_authorized: bool | None = None
+    asr_fallback_authorized: bool | None = None
     mode: AnalysisMode = AnalysisMode.summary
     use_mock: bool | None = None
     llm_provider: str | None = None

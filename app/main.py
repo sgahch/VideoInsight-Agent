@@ -343,7 +343,7 @@ def get_asr_settings(x_client_id: str | None = Header(default=None)) -> dict:
 
 
 @app.put("/asr/settings/{provider}")
-async def update_asr_settings(provider: Literal["siliconflow", "cloudflare", "groq", "faster_whisper"], request: Request,
+async def update_asr_settings(provider: Literal["siliconflow", "siliconflow_qwen", "cloudflare", "groq", "faster_whisper"], request: Request,
                               x_client_id: str | None = Header(default=None)) -> dict:
     from app.asr_settings import SettingsUpdate, save_settings
     from pydantic import ValidationError
@@ -360,7 +360,7 @@ async def update_asr_settings(provider: Literal["siliconflow", "cloudflare", "gr
 
 
 @app.delete("/asr/settings/{provider}")
-def delete_asr_settings(provider: Literal["siliconflow", "cloudflare", "groq", "faster_whisper"], request: Request,
+def delete_asr_settings(provider: Literal["siliconflow", "siliconflow_qwen", "cloudflare", "groq", "faster_whisper"], request: Request,
                         x_client_id: str | None = Header(default=None)) -> dict:
     from app.asr_settings import clear_settings
     _check_origin(request)
@@ -369,7 +369,7 @@ def delete_asr_settings(provider: Literal["siliconflow", "cloudflare", "groq", "
 
 
 @app.post("/asr/settings/{provider}/check")
-def check_asr_settings(provider: Literal["siliconflow", "cloudflare", "groq", "faster_whisper"], request: Request,
+def check_asr_settings(provider: Literal["siliconflow", "siliconflow_qwen", "cloudflare", "groq", "faster_whisper"], request: Request,
                        x_client_id: str | None = Header(default=None)) -> dict:
     from app.asr_settings import check_settings
     _check_origin(request)
@@ -432,6 +432,8 @@ def submit_file_analysis(
     use_mock: bool | None = Form(None),
     asr_provider: str | None = Form(None),
     asr_require_timestamps: bool = Form(True),
+    asr_paid_authorized: bool | None = Form(None),
+    asr_fallback_authorized: bool | None = Form(None),
     llm_provider: str | None = Form(None),
     llm_base_url: str | None = Form(None),
     llm_model: str | None = Form(None),
@@ -441,6 +443,7 @@ def submit_file_analysis(
 ) -> AnalyzeResponse:
     request = AnalyzeRequest(
         asr_provider=asr_provider, asr_require_timestamps=asr_require_timestamps,
+        asr_paid_authorized=asr_paid_authorized, asr_fallback_authorized=asr_fallback_authorized,
         url=f"upload://{file.filename or 'uploaded-media'}",
         label=file.filename,
         mode=mode,

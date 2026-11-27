@@ -169,7 +169,7 @@
         <div class="card-panel" style="grid-column:1/-1">
           <label for="asrProvider">语音转写服务</label>
           <select id="asrProvider" class="form-input"><option value="">服务器默认服务</option></select>
-          <p class="input-hint">音频仅发送给所选服务，失败不会自动换服务商。纯文本服务不提供时间戳与字幕时间轴；离线 Whisper 不向外部服务上传音频。</p>
+          <p class="input-hint">音频仅发送给所选服务。Qwen 付费转写可授权失败后使用离线 Whisper 兜底，字幕时间段由离线 Whisper 提供；SenseVoice 仅纯文本。</p>
           <details id="asrSettings" class="asr-settings">
             <summary>配置转写服务 / API Key</summary>
             <form id="asrSettingsForm" autocomplete="off">
@@ -178,6 +178,7 @@
                 <label for="asrSettingsProvider">要配置的服务</label>
                 <select id="asrSettingsProvider" class="form-input">
                   <option value="siliconflow">硅基流动 SenseVoiceSmall（免费纯文本）</option>
+                  <option value="siliconflow_qwen">硅基流动 Qwen3-ASR（付费，离线时间戳）</option>
                   <option value="cloudflare">Cloudflare Whisper（时间戳）</option>
                   <option value="groq">Groq Whisper（时间戳）</option>
                   <option value="faster_whisper">离线 Whisper（时间戳）</option>
@@ -195,6 +196,10 @@
                 <p class="input-hint">密钥不会回显。留空保留已保存的密钥；更换密钥请重新填写。</p>
               </div>
               <label id="asrFreeGroup" class="asr-check" hidden><input id="asrFreeConfirmed" type="checkbox" /> 我已确认此 Groq 账号使用免费计划，未启用付费计费</label>
+              <div id="asrPaidGroup" hidden>
+                <label class="asr-check"><input id="asrPaidAuthorized" type="checkbox" /> 授权调用付费 Qwen3-ASR（当前 ¥0.00022/秒，按片段计费；不能保证代金券适用）</label>
+                <label class="asr-check"><input id="asrFallbackAuthorized" type="checkbox" /> 失败后自动保留离线 Whisper 结果，停止本任务后续付费请求</label>
+              </div>
               <div class="form-group">
                 <label for="asrTimeout">单次转写超时（秒）</label>
                 <input id="asrTimeout" class="form-input" type="number" min="5" max="600" value="180" required />
@@ -629,8 +634,8 @@
   <script src="/static/local-login.js?v=20261116-helper101"></script>
   <script src="/static/client-identity.js?v=20261127"></script>
   <script src="/static/resumable-upload.js?v=20261126-upload1"></script>
-  <script src="/static/asr-settings.js?v=20261127-settings1"></script>
-  <script src="/static/app.js?v=20261127-settings1"></script>
+  <script src="/static/asr-settings.js?v=20261127-paid1"></script>
+  <script src="/static/app.js?v=20261127-paid1"></script>
 </body>
 
 </html>

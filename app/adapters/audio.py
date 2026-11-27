@@ -91,7 +91,7 @@ def run_ffmpeg_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 class FfmpegAudioPreprocessor:
-    def convert_to_wav16k(self, input_audio: Path, output_wav: Path) -> Path:
+    def convert_to_wav16k(self, input_audio: Path, output_wav: Path, *, timeout_seconds: float | None = None) -> Path:
         ffmpeg = resolve_ffmpeg()
         output_wav.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
@@ -107,14 +107,14 @@ class FfmpegAudioPreprocessor:
             "-y",
             str(output_wav),
         ]
-        completed = _run_ffmpeg(cmd, output_wav)
+        completed = _run_ffmpeg(cmd, output_wav) if timeout_seconds is None else _run_ffmpeg(cmd, output_wav, timeout_seconds=timeout_seconds)
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
             raise WorkflowError(f"音频格式转换失败：{detail}")
         return output_wav
 
 
-def _run_ffmpeg(cmd: list[str], output_wav: Path) -> subprocess.CompletedProcess[str]:
+def _run_ffmpeg(cmd: list[str], output_wav: Path, *, timeout_seconds: float | None = None) -> subprocess.CompletedProcess[str]:
     """执行 ffmpeg；超时则中止并清掉半成品 WAV。
 
     半成品必须删掉：它的 WAV 头是合法的，`_wav_duration` 会读出一个偏短的
@@ -128,7 +128,7 @@ def _run_ffmpeg(cmd: list[str], output_wav: Path) -> subprocess.CompletedProcess
             encoding="utf-8",
             errors="replace",
             check=False,
-            timeout=FFMPEG_TIMEOUT_SECONDS,
+            timeout=FFMPEG_TIMEOUT_SECONDS if timeout_seconds is None else max(.001, min(FFMPEG_TIMEOUT_SECONDS, timeout_seconds)),
         )
     except subprocess.TimeoutExpired as exc:
         try:

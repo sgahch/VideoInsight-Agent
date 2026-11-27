@@ -117,6 +117,14 @@ function page({ records = new Map(), account, storageFailure, handler = () => nu
 
 const link = { url: "https://video.example.test/1", mode: "summary", useMock: false };
 
+test('paid retry preserves explicit fallback denial despite a new default',async()=>{
+  const browser=page({account:ACCOUNT_A});await browser.ready;
+  const choice=browser.context.testApi.retryAsrChoice({request:{asr_provider:'siliconflow_qwen',asr_paid_authorized:true,asr_fallback_authorized:false}});
+  await browser.context.testApi.startLinkAnalysis({...link,...choice});
+  const body=JSON.parse(browser.requests.find(r=>r.path==='/analyze').body);
+  assert.equal(body.asr_provider,'siliconflow_qwen');assert.equal(body.asr_paid_authorized,true);assert.equal(body.asr_fallback_authorized,false);
+});
+
 test('ordinary and cookie-login retries retain the original ASR destination', async () => {
   const browser = page({ account: ACCOUNT_A });
   await browser.ready;

@@ -1442,8 +1442,9 @@
 
   function retryAsrChoice(task) {
     const previous = task.request?.asr_provider || task.result?.diagnostics?.asr_provider;
-    const provider = ["groq", "cloudflare", "siliconflow", "faster_whisper"].includes(previous) ? previous : "faster_whisper";
-    return { asrProvider: provider, requireTimestamps: task.request?.asr_require_timestamps !== false };
+    const provider = ["groq", "cloudflare", "siliconflow", "siliconflow_qwen", "faster_whisper"].includes(previous) ? previous : "faster_whisper";
+    return { asrProvider: provider, requireTimestamps: task.request?.asr_require_timestamps !== false,
+      asrConsent: provider === "siliconflow_qwen" ? { asr_paid_authorized: task.request?.asr_paid_authorized === true, asr_fallback_authorized: task.request?.asr_fallback_authorized === true } : {} };
   }
 
   function asrPayload() {
@@ -1456,7 +1457,7 @@
   function renderAsrProviders(config, chosen) {
     const select = document.getElementById("asrProvider");
     if (!select || !config) return;
-    const names = { faster_whisper: "离线 Whisper · 时间戳 · 无 API 费用", siliconflow: "硅基流动 SenseVoice · 仅纯文本", cloudflare: "Cloudflare Whisper · 时间戳 · 需验证免费计划", groq: "Groq Whisper · 时间戳" };
+    const names = { faster_whisper: "离线 Whisper · 时间戳 · 无 API 费用", siliconflow: "硅基流动 SenseVoice · 仅纯文本", siliconflow_qwen: "Qwen3-ASR · 付费 · 离线时间戳 / 可选免费兜底", cloudflare: "Cloudflare Whisper · 时间戳 · 需验证免费计划", groq: "Groq Whisper · 时间戳" };
     select.replaceChildren();
     for (const item of config.providers) {
       const option = document.createElement("option");
@@ -1468,7 +1469,7 @@
     select.value = config.providers.some(item => item.id === chosen && item.configured) ? chosen : config.default;
   }
 
-  async function startLinkAnalysis({ url, mode, useMock, label, asrProvider = null, requireTimestamps = true }, automaticRetry = false) {
+  async function startLinkAnalysis({ url, mode, useMock, label, asrProvider = null, requireTimestamps = true, asrConsent = {} }, automaticRetry = false) {
     if (!identityResolved) return;
     if (!url) {
       setTaskStatus("failed", "请输入视频链接。");
@@ -1484,7 +1485,7 @@
     els.linkSubmit.disabled = true;
     els.linkSubmit.textContent = automaticRetry ? "登录成功，正在重试..." : "提交中...";
     try {
-      const body = Object.assign({ url: url, mode: mode, use_mock: useMock }, asrProvider ? { asr_provider: asrProvider, asr_require_timestamps: requireTimestamps } : asrPayload(), llmPayload);
+      const body = Object.assign({ url: url, mode: mode, use_mock: useMock }, asrProvider ? { asr_provider: asrProvider, asr_require_timestamps: requireTimestamps, ...asrConsent } : asrPayload(), llmPayload);
       if (label) {
         body.label = label;
       }

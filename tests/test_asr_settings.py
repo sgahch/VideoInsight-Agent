@@ -78,3 +78,38 @@ def test_profile_is_applied_when_task_provider_is_pinned(api):
     task=pin_provider(AnalyzeRequest(url='upload://audio.wav',client_id='alice'),cfg)
     assert task.asr_provider=='siliconflow'
     assert pin_provider(task,replace(cfg,asr_provider='groq')).asr_provider=='siliconflow'
+
+
+def test_paid_provider_requires_own_key_and_account_scoped_consent(api,monkeypatch,tmp_path):
+    client,cfg=api;alice={'X-Client-Id':'alice'};bob={'X-Client-Id':'bob'}
+    model=tmp_path/'base';model.mkdir();(model/'model.bin').touch()
+    cfg=replace(cfg,faster_whisper_model_path=str(model))
+    monkeypatch.setattr(main,'settings',cfg)
+    monkeypatch.setattr('app.adapters.multi_asr.importlib.util.find_spec',lambda name:True)
+    assert client.put('/asr/settings/siliconflow_qwen',json={'api_key':'private-qwen-key','make_default':True},headers=alice).status_code==422
+    result=client.put('/asr/settings/siliconflow_qwen',json={'api_key':'private-qwen-key','paid_authorized':True,'fallback_authorized':True,'make_default':True},headers=alice)
+    assert result.status_code==200,result.text
+    assert 'private-qwen-key' not in result.text and result.json()['default']=='siliconflow_qwen'
+    from app.asr_settings import task_settings,effective_settings
+    from app.adapters.multi_asr import pin_provider
+    from app.schemas import AnalyzeRequest
+    task=pin_provider(AnalyzeRequest(url='upload://speech.wav',client_id='alice'),cfg)
+    assert task.asr_paid_authorized and task.asr_fallback_authorized
+    active=task_settings(cfg,task)
+    assert active.qwen_asr_api_key=='private-qwen-key' and active.qwen_asr_authorized
+    assert not effective_settings(cfg,'bob').qwen_asr_authorized
+    assert not client.get('/asr/settings',headers=bob).json()['fields']['siliconflow_qwen']['credential_saved']
+    revoked=client.put('/asr/settings/siliconflow_qwen',json={'paid_authorized':False,'make_default':True},headers=alice)
+    assert revoked.status_code==200 and revoked.json()['default']=='faster_whisper'
+    assert not task_settings(cfg,task).qwen_asr_authorized
+    assert not task_settings(cfg,task.model_copy(update={'asr_paid_authorized':False})).qwen_asr_authorized
+    client.delete('/asr/settings/siliconflow_qwen',headers=alice).raise_for_status()
+    assert effective_settings(cfg,'alice').qwen_asr_api_key is None
+
+
+def test_signed_account_cannot_inherit_shared_paid_credentials(tmp_path):
+    from app.asr_settings import effective_settings,save_settings,SettingsUpdate
+    cfg=replace(Settings(),db_path=tmp_path/'db',qwen_asr_api_key='server-only-key',qwen_asr_authorized=True,qwen_fallback_authorized=True)
+    owner='account:'+'a'*32
+    save_settings(cfg,owner,'siliconflow_qwen',SettingsUpdate(paid_authorized=True,fallback_authorized=True))
+    assert effective_settings(cfg,owner).qwen_asr_api_key is None

@@ -84,6 +84,22 @@ def test_out_of_order_chunks_merge_to_original_and_start_analysis(upload_env):
     assert "must-not-be-persisted" not in str(task)
 
 
+def test_paid_consent_denial_survives_both_upload_entrypoints(upload_env,monkeypatch):
+    from dataclasses import replace
+    client,settings,store,_=upload_env
+    cfg=replace(settings,qwen_asr_authorized=True,qwen_fallback_authorized=True)
+    monkeypatch.setattr(main,'settings',cfg)
+    for direct in (False,True):
+        options={'asr_provider':'siliconflow_qwen','asr_paid_authorized':False,'asr_fallback_authorized':False,'use_mock':True}
+        if direct:
+            response=client.post('/analyze-file',data={k:str(v).lower() if isinstance(v,bool) else v for k,v in options.items()},files={'file':('a.wav',b'abc','audio/wav')})
+        else:
+            session=new_upload(client);send_all(client,session);response=finish(client,session,**options)
+        assert response.status_code==202,response.text
+        task=store.get(response.json()['task_id'])
+        assert task.request.asr_paid_authorized is False and task.request.asr_fallback_authorized is False
+
+
 def test_resume_survives_new_store_instance_and_skips_accepted_chunks(upload_env):
     client, settings, _, _ = upload_env
     session = new_upload(client)

@@ -1,4 +1,4 @@
-"""Explicit providers: no cross-provider failover, no audio POST retries, no paid models."""
+"""Explicit providers; paid Qwen and its fallback require separate authorization."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -46,7 +46,7 @@ class Capability:
 
 
 CAPABILITIES = {p.id: p for p in [Capability("siliconflow", False, True),
-    Capability("cloudflare", True, True), Capability("faster_whisper", True, False), Capability("groq", True, True)]}
+    Capability("siliconflow_qwen", True, True), Capability("cloudflare", True, True), Capability("faster_whisper", True, False), Capability("groq", True, True)]}
 
 
 def pin_provider(request, settings):
@@ -54,7 +54,12 @@ def pin_provider(request, settings):
     from app.asr_settings import effective_settings
     settings = effective_settings(settings, request.client_id)
     if request.asr_provider is None and settings.asr_provider in CAPABILITIES:
-        return request.model_copy(update={"asr_provider": settings.asr_provider})
+        request = request.model_copy(update={"asr_provider": settings.asr_provider})
+    if request.asr_provider == 'siliconflow_qwen':
+        return request.model_copy(update={
+            'asr_paid_authorized': settings.qwen_asr_authorized and request.asr_paid_authorized is not False,
+            'asr_fallback_authorized': settings.qwen_fallback_authorized and request.asr_fallback_authorized is not False,
+        })
     return request
 
 
@@ -63,9 +68,10 @@ def provider_catalog(settings: Settings) -> list[dict]:
              "cloudflare": bool(settings.cloudflare_api_token and re.fullmatch(r"[a-f0-9]{32}", settings.cloudflare_account_id)),
              "faster_whisper": bool(settings.faster_whisper_model_path and Path(settings.faster_whisper_model_path, "model.bin").is_file() and importlib.util.find_spec("faster_whisper")),
              "groq": bool(settings.groq_api_key) and (not settings.asr_free_only or settings.groq_free_tier_confirmed)}
+    ready['siliconflow_qwen'] = bool(settings.qwen_asr_api_key and settings.qwen_asr_authorized and ready['faster_whisper'])
     return [{"id": p.id, "timestamps": p.timestamps, "cloud": p.cloud, "configured": ready[p.id],
-             "free_policy": "offline" if not p.cloud else "verified_free_plan" if p.id == "cloudflare" else "free_model" if p.id == "siliconflow" else "operator_free_account",
-             "model": SF_MODEL if p.id == "siliconflow" else CF_MODEL if p.id == "cloudflare" else "base-int8" if p.id == "faster_whisper" else settings.groq_asr_model}
+             "free_policy": "explicit_paid" if p.id == 'siliconflow_qwen' else "offline" if not p.cloud else "verified_free_plan" if p.id == "cloudflare" else "free_model" if p.id == "siliconflow" else "operator_free_account",
+             "model": 'Qwen/Qwen3-ASR-1.7B' if p.id == 'siliconflow_qwen' else SF_MODEL if p.id == "siliconflow" else CF_MODEL if p.id == "cloudflare" else "base-int8" if p.id == "faster_whisper" else settings.groq_asr_model}
             for p in CAPABILITIES.values()]
 
 

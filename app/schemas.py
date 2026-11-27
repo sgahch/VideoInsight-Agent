@@ -31,8 +31,10 @@ class AuthSessionRequest(BaseModel):
 
 
 class AnalyzeRequest(BaseModel):
-    asr_provider: Literal["groq", "siliconflow", "cloudflare", "faster_whisper"] | None = None
+    asr_provider: Literal["groq", "siliconflow", "siliconflow_qwen", "cloudflare", "faster_whisper"] | None = None
     asr_require_timestamps: bool = True
+    asr_paid_authorized: bool | None = None
+    asr_fallback_authorized: bool | None = None
     url: str = Field(..., description="Video URL to analyze. 支持纯链接，也支持平台分享文案（会自动裁剪）。")
     label: str | None = Field(
         default=None,

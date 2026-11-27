@@ -111,6 +111,9 @@ def select_transcriber(
     if use_mock:
         return MockTranscriber()
     provider = settings.asr_provider.strip().lower()
+    if provider == 'siliconflow_qwen':
+        from app.adapters.paid_asr import PaidQwenTranscriber
+        return PaidQwenTranscriber(settings)
     if settings.asr_free_only and (provider == "paraformer" or (provider == "groq" and not settings.groq_free_tier_confirmed)):
         raise ExternalDependencyError("严格免费模式禁止收费 ASR 或未确认免费计划的 Groq；请选择离线 Whisper 或已验证免费服务。")
     if provider == "paraformer":

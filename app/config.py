@@ -4,6 +4,7 @@ import os
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from dotenv import load_dotenv
 
@@ -33,6 +34,10 @@ class Settings:
     asr_task_timeout_seconds: int = int(os.getenv("ASR_TASK_TIMEOUT_SECONDS", "3600"))
     siliconflow_api_key: str | None = field(default=os.getenv("SILICONFLOW_API_KEY") or None, repr=False)
     siliconflow_asr_model: str = os.getenv("SILICONFLOW_ASR_MODEL", "FunAudioLLM/SenseVoiceSmall")
+    qwen_asr_api_key: str | None = field(default=os.getenv("QWEN_ASR_API_KEY") or None, repr=False)
+    qwen_asr_authorized: bool = _bool_env("QWEN_ASR_AUTHORIZED", False)
+    qwen_fallback_authorized: bool = _bool_env("QWEN_FALLBACK_AUTHORIZED", False)
+    asr_authorization_check: Callable[[], tuple[bool, bool]] | None = field(default=None, repr=False, compare=False)
     cloudflare_account_id: str = os.getenv("CLOUDFLARE_ACCOUNT_ID", "")
     cloudflare_api_token: str | None = field(default=os.getenv("CLOUDFLARE_API_TOKEN") or None, repr=False)
     faster_whisper_model_path: str = os.getenv("FASTER_WHISPER_MODEL_PATH", "")
@@ -112,6 +117,7 @@ class Settings:
 
     @property
     def asr_model(self) -> str:
+        if self.asr_provider == "siliconflow_qwen": return "Qwen/Qwen3-ASR-1.7B"
         if self.asr_provider == "siliconflow": return self.siliconflow_asr_model
         if self.asr_provider == "cloudflare": return "@cf/openai/whisper-large-v3-turbo"
         if self.asr_provider == "faster_whisper": return "base-int8"
@@ -119,7 +125,7 @@ class Settings:
 
     @property
     def asr_global_workers(self) -> int:
-        if self.asr_provider in ("faster_whisper", "siliconflow", "cloudflare"): return 1
+        if self.asr_provider in ("faster_whisper", "siliconflow", "cloudflare", "siliconflow_qwen"): return 1
         value = self.groq_asr_global_workers if self.asr_provider.strip().lower() == "groq" else self.dashscope_asr_global_workers
         return max(1, value)
 

@@ -1,7 +1,8 @@
 # ASR providers and free-only operation
 
-Every task names one provider. There is no automatic provider failover or
-network-error upload retry. An explicit selection authorizes that destination;
+Every task names one provider. Ordinary providers do not automatically fail over
+or repeat uploads. The separately authorized paid Qwen provider may retain local
+Whisper results after failure, as described below. Explicit selection authorizes that destination;
 retrying a task retains its stored selection. Existing task JSON remains readable.
 
 | Provider | Timestamps | Free policy | Readiness |
@@ -10,14 +11,36 @@ retrying a task retains its stored selection. Existing task JSON remains readabl
 | siliconflow | Text only | Exact SenseVoiceSmall allowlist plus official pricing preflight | SILICONFLOW_API_KEY |
 | cloudflare | Actual segment times | Subscription API must positively identify Workers Free; unknown/paid plans rejected | Account ID and token with Workers AI and subscription-read access |
 | groq | Actual segment times | In strict mode, operator must confirm a free account | Existing key; proxy optional |
+| siliconflow_qwen | Offline Whisper speech intervals | Explicit per-account paid and fallback consent | Personal Qwen key plus installed offline model |
 
 Production uses `ASR_FREE_ONLY=true`. Paid Paraformer and unconfirmed Groq
 accounts are blocked. There is no endpoint that upgrades a plan. Qwen3-ASR-1.7B
-is deliberately blocked: the official price page checked on 2026-11-27 lists
-¥0.00022/second, and the public transcription contract currently enumerates
-SenseVoiceSmall and TeleSpeechASR. Sending Qwen test audio would violate the
-free-only requirement. Its request shape is compatible with the multipart
-adapter, but paid audio inference was not tested or enabled.
+remains blocked through the free SenseVoice adapter. Following explicit user
+authorization on 2026-11-27, the separate Qwen provider permits only
+`Qwen/Qwen3-ASR-1.7B` with personal paid consent. A real 6.73-second server
+probe returned correct text in 0.45 seconds (upstream reports 7 billed seconds).
+The current official price is ¥0.00022/second. The supplied voucher list omits
+this model; a successful request does not establish voucher eligibility.
+
+## Authorized paid Qwen and free fallback
+
+The paid provider first uses installed offline Whisper to locate speech
+intervals. It cuts actual PCM samples at those boundaries and sends each interval
+to Qwen once. Qwen replaces the interval text while preserving its actual start
+and end, so SRT/VTT remain available. These are offline segment boundaries, not
+native Qwen word-level alignment; missed speech or inaccurate boundaries in the
+offline pass may limit results. This adds local CPU time and may increase billed
+seconds because the upstream rounds each short interval.
+
+If a paid interval fails and fallback consent is present, retain its offline
+text and use offline results for every remaining interval. Successful Qwen text
+is preserved. No paid POST retry, Groq/Cloudflare upload, or automatic model
+upgrade occurs. Paid and fallback consent are pinned at submission, rechecked
+before each upload/use, and revocable. Signed accounts never inherit a shared
+paid server key. Both direct and resumable uploads preserve explicit denials.
+Diagnostics identify the actual model, paid/fallback segment counts, category
+of the first failure and the offline timestamp source. Free providers retain
+their existing policy.
 
 SenseVoiceSmall cannot satisfy a timestamp-required request. Selecting its
 clearly marked text-only option explicitly opts out of timestamps. The task
