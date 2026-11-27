@@ -1451,7 +1451,7 @@
     return provider ? { asr_provider: provider, asr_require_timestamps: provider !== "siliconflow" } : {};
   }
 
-  const asrSettingsView = window.AsrSettings?.create({ document, request: fetchJson, onChange: (config, chosen) => renderAsrProviders(config, chosen) });
+  const asrSettingsView = window.AsrSettings?.create({ document, request: (url, options) => fetchJson(url, options, 40000), onChange: (config, chosen) => renderAsrProviders(config, chosen) });
 
   function renderAsrProviders(config, chosen) {
     const select = document.getElementById("asrProvider");
