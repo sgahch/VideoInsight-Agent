@@ -931,3 +931,47 @@ Private backup:
 Verified source, manifest, Linux results, and deployment scripts:
 `/opt/videoinsight/releases/c4e9a2b`.
 The release-specific build file is `Dockerfile.resumable-upload`.
+
+## 2026-11-27: Committed Reliability And Account Identity Update
+
+`videoinsight:1fc8544` replaces `videoinsight:c4e9a2b` and contains Git commit
+`1fc8544616ec195b651d3368ae7d103c3a7c92fd`, pushed first to GitHub on
+`codex/resumable-upload`. The image inherits the existing production runtime
+and updates the application and web files. It includes account-scoped browser
+identity, ASR and download fixes, source-video handling, and the previously
+deployed resumable uploader and chat history.
+
+Windows regression passed 833 Python tests with seven optional skips;
+all 31 Node tests passed. The isolated Linux regression passed 829 tests with
+eight optional skips and excluded the desktop-only Tk window module. One
+existing dependency deprecation warning remains. Source archives use
+`git -c core.autocrlf=false archive` so deployed bytes match Git blobs.
+The isolated service and production both passed authenticated chunk upload,
+out-of-order and duplicate chunks, resume state, duplicate completion,
+cancellation, mock task completion, and cleanup checks. No paid model
+inference or real platform login was used for this verification.
+
+The TLS maintenance configuration temporarily paused new submissions while
+existing tasks and QR/helper sessions drained. Database, environment and
+Nginx configurations were backed up before replacement. After the switch,
+the original Nginx files were restored and submissions reopened. Verification
+preserved all five existing account rows and 26 historical task rows, checked
+all 58 committed runtime files and the existing helper executable, and
+confirmed that application settings and auxiliary container identities were
+unchanged. Public certificate-verified HTTPS checks passed for redirects,
+health, frontend asset hashes, login, account identity, stale-account request
+rejection, and logout.
+
+The Groq proxy was already unhealthy before this update. Its configured
+upstream hostname resolved, but TCP connections to the node timed out and
+the Groq TLS handshake through the proxy failed. The existing proxy container
+and its configuration were retained. This release does not restore the
+upstream route; real Groq transcription remains affected until that route
+is repaired. Application and QR browser health checks passed.
+
+Rollback container:
+`videoinsight-before-local-helper-1fc8544-reliability` (stopped, restart disabled).
+Private backup:
+`/opt/videoinsight/backups/20261127-local-helper-1fc8544-reliability`.
+Committed source, release Dockerfile, verification scripts and manifest:
+`/opt/videoinsight/releases/1fc8544`.
