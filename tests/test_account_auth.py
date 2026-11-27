@@ -33,6 +33,21 @@ def sign_in(client):
     return client.post("/auth/login", json={"username": "ynchen", "password": "test-password"})
 
 
+def test_auth_me_returns_no_account_id_without_an_account(client):
+    me = client.get("/auth/me").json()
+    assert me["authenticated"] is False
+    assert me["account_id"] is None
+
+
+def test_stale_browser_account_id_is_rejected_before_processing_payload(client):
+    sign_in(client)
+    response = client.post("/llm/test", content="invalid JSON",
+                           headers={"X-VideoInsight-Account-Id": "account:previous"})
+    assert response.status_code == 409
+    assert response.json()["code"] == "account_changed"
+    assert client.get("/tasks", headers={"X-VideoInsight-Account-Id": "admin%3Aynchen"}).status_code == 200
+
+
 def test_anonymous_page_redirects_and_api_is_protected(client):
     assert client.get("/", follow_redirects=False).headers["location"] == "/login"
     assert client.get("/comments", follow_redirects=False).headers["location"] == "/login"
@@ -54,7 +69,9 @@ def test_login_and_logout_with_cookie(client):
     assert "test-password" not in cookie
     assert client.get("/").status_code == 200
     assert client.get("/tasks").status_code == 200
-    assert client.get("/auth/me").json()["username"] == "ynchen"
+    me = client.get("/auth/me").json()
+    assert me["username"] == "ynchen"
+    assert me["account_id"] == "admin:ynchen"
     assert client.get("/login", follow_redirects=False).headers["location"] == "/"
     assert client.post("/auth/logout").status_code == 200
     assert client.get("/tasks").status_code == 401

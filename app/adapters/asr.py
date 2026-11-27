@@ -262,79 +262,83 @@ class ParaformerTranscriber:
         """
         ffmpeg = resolve_ffmpeg()
         cmd = [ffmpeg, "-i", str(audio_path), "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except OSError as exc:
-            raise WorkflowError(f"ffmpeg 启动失败：{exc}")
-
         stderr_chunks: list[bytes] = []
-        stop = threading.Event()
 
         def _drain_stderr() -> None:
             try:
-                while not stop.is_set():
-                    chunk = proc.stderr.read(4096)
-                    if not chunk:
-                        break
+                while chunk := proc.stderr.read(4096):
                     stderr_chunks.append(chunk)
-            except Exception:  # noqa: BLE001 - 避免管道读取异常阻断主流程
+            except OSError:
                 pass
 
         stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
-        stderr_thread.start()
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as exc:
+            raise WorkflowError(f"ffmpeg 启动失败：{exc}") from exc
 
-        workers = max(1, self.settings.dashscope_asr_max_workers)
-        executor = ThreadPoolExecutor(max_workers=workers)
+        executor = None
         chunk_paths: list[Path] = []
         futures = []
-        index = 0
-        try:
-            chunk_bytes = chunk_seconds * 16000 * 2
-            while True:
-                data = proc.stdout.read(chunk_bytes)
-                if not data:
-                    break
-                chunk_path = audio_path.parent / f"{task_id}-asr-{index:04d}.wav"
-                _write_wav16k(chunk_path, data)
-                chunk_paths.append(chunk_path)
-                futures.append(
-                    executor.submit(self._recognize_chunk, index, chunk_path, chunk_seconds, recognition_class)
-                )
-                index += 1
-        finally:
-            try:
-                proc.stdout.close()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                if proc.poll() is None:
-                    proc.wait(timeout=5)
-            except Exception:  # noqa: BLE001
-                pass
-            stop.set()
-            stderr_thread.join(timeout=2)
-
-        if not chunk_paths and proc.returncode not in (0, None):
-            detail = b"".join(stderr_chunks).decode("utf-8", "replace").strip() or "unknown ffmpeg error"
-            raise WorkflowError(f"ffmpeg 解码失败：{detail}")
-
         results: list[tuple[int, list[TranscriptSegment]]] = []
-        total = (
-            (int(self.last_duration) + chunk_seconds - 1) // chunk_seconds
-            if self.last_duration
-            else max(1, len(futures))
-        )
+        pipeline_error: WorkflowError | None = None
         try:
-            done = 0
-            for future in as_completed(futures):
+            with proc:
+                try:
+                    stderr_thread.start()
+                    workers = max(1, self.settings.dashscope_asr_max_workers)
+                    executor = ThreadPoolExecutor(max_workers=workers)
+                    chunk_bytes = chunk_seconds * 16000 * 2
+                    index = 0
+                    while data := proc.stdout.read(chunk_bytes):
+                        chunk_path = audio_path.parent / f"{task_id}-asr-{index:04d}.wav"
+                        chunk_paths.append(chunk_path)
+                        _write_wav16k(chunk_path, data)
+                        futures.append(
+                            executor.submit(self._recognize_chunk, index, chunk_path, chunk_seconds, recognition_class)
+                        )
+                        index += 1
+                    returncode = proc.wait(timeout=5)
+                except OSError as exc:
+                    raise WorkflowError(f"ffmpeg 分片读写失败：{exc}") from exc
+                except subprocess.TimeoutExpired as exc:
+                    raise WorkflowError("ffmpeg 输出结束后未正常退出，已中止。") from exc
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait()
+                    if stderr_thread.ident is not None:
+                        stderr_thread.join()
+
+            if returncode != 0:
+                detail = b"".join(stderr_chunks).decode("utf-8", "replace").strip() or f"退出码 {returncode}"
+                raise WorkflowError(f"ffmpeg 解码失败：{detail}")
+
+            total = (
+                (int(self.last_duration) + chunk_seconds - 1) // chunk_seconds
+                if self.last_duration
+                else max(1, len(futures))
+            )
+            for done, future in enumerate(as_completed(futures), start=1):
                 results.append(future.result())
-                done += 1
                 if reporter is not None:
                     reporter.on_transcribe_chunk(done, total)
+        except _RecognitionError:
+            raise
+        except WorkflowError as exc:
+            pipeline_error = exc
         finally:
-            executor.shutdown(wait=True, cancel_futures=True)
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
             for chunk_path in chunk_paths:
                 _best_effort_unlink(chunk_path)
+
+        if pipeline_error is not None:
+            # 解码和识别可同时失败。已失败的识别请求不应借整文件转码再上传。
+            for future in futures:
+                if not future.cancelled() and isinstance(error := future.exception(), _RecognitionError):
+                    raise error from pipeline_error
+            raise pipeline_error
 
         segments = [segment for _, chunk in sorted(results) for segment in chunk]
         segments.sort(key=lambda segment: (segment.start, segment.end))
@@ -385,8 +389,8 @@ class ParaformerTranscriber:
         """
         self._current_task_id = task_id
         wav_path = audio_path.parent / f"{task_id}-16k.wav"
-        self.preprocessor.convert_to_wav16k(audio_path, wav_path)
         try:
+            self.preprocessor.convert_to_wav16k(audio_path, wav_path)
             duration = _wav_duration(wav_path) or 0.0
             self.last_duration = duration
             chunk_seconds = max(1, self.settings.dashscope_asr_chunk_seconds)
@@ -394,12 +398,9 @@ class ParaformerTranscriber:
             max_workers = max(1, self.settings.dashscope_asr_max_workers)
             if duration >= threshold and chunk_seconds > 0 and max_workers > 1:
                 chunk_paths = _split_wav(wav_path, task_id, chunk_seconds, duration)
-                if reporter is not None:
-                    reporter.mark_transcribe_started(
-                        duration,
-                        max(1, len(chunk_paths)),
-                    )
                 try:
+                    if reporter is not None:
+                        reporter.mark_transcribe_started(duration, max(1, len(chunk_paths)))
                     return self._transcribe_chunks(chunk_paths, chunk_seconds, recognition_class, reporter)
                 finally:
                     for chunk_path in chunk_paths:
@@ -451,21 +452,21 @@ def _wav_duration(path: Path) -> float | None:
 
 def _split_wav(path: Path, task_id: str, chunk_seconds: int, duration: float) -> list[Path]:
     del duration  # The frame count is the authoritative boundary for WAV files.
-    with wave.open(str(path), "rb") as source:
-        params = source.getparams()
-        frames_per_chunk = max(1, int(params.framerate * chunk_seconds))
-        chunks: list[Path] = []
-        index = 0
-        while True:
-            frames = source.readframes(frames_per_chunk)
-            if not frames:
-                break
-            chunk_path = path.parent / f"{task_id}-asr-{index:04d}.wav"
-            with wave.open(str(chunk_path), "wb") as target:
-                target.setparams(params)
-                target.writeframes(frames)
-            chunks.append(chunk_path)
-            index += 1
+    chunks: list[Path] = []
+    try:
+        with wave.open(str(path), "rb") as source:
+            params = source.getparams()
+            frames_per_chunk = max(1, int(params.framerate * chunk_seconds))
+            while frames := source.readframes(frames_per_chunk):
+                chunk_path = path.parent / f"{task_id}-asr-{len(chunks):04d}.wav"
+                chunks.append(chunk_path)
+                with wave.open(str(chunk_path), "wb") as target:
+                    target.setparams(params)
+                    target.writeframes(frames)
+    except BaseException:
+        for chunk_path in chunks:
+            _best_effort_unlink(chunk_path)
+        raise
     return chunks
 
 

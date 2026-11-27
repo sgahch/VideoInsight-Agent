@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
@@ -18,7 +19,7 @@ from app.cleanup import (
 )
 from app.config import Settings
 from app.main import app
-from app.schemas import AnalysisMode, AnalysisResult, AnalyzeRequest, MediaInfo
+from app.schemas import AnalysisMode, AnalysisResult, AnalyzeRequest, MediaInfo, TaskStatus
 from app.task_queue import TaskQueue
 from app.task_store import SQLiteTaskStore
 
@@ -114,50 +115,101 @@ def test_prune_respects_min_age_guard(tmp_path: Path) -> None:
 
 
 def _backdate_task(settings: Settings, task_id: str, hours: int) -> None:
-    """把任务的 created_at 拨回 N 小时前，用来模拟历史数据。"""
     stamp = (datetime.now() - timedelta(hours=hours)).isoformat(timespec="seconds")
-    conn = sqlite3.connect(settings.db_path)
-    conn.execute("UPDATE tasks SET created_at = ? WHERE task_id = ?", (stamp, task_id))
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(settings.db_path) as conn:
+        conn.execute(
+            "UPDATE tasks SET created_at = ?, updated_at = ? WHERE task_id = ?",
+            (stamp, stamp, task_id),
+        )
 
 
-def test_prune_expired_tasks_removes_record_and_artifacts(tmp_path: Path) -> None:
+def _make_task_artifacts(settings: Settings, task_id: str) -> tuple[Path, Path, Path]:
+    scratch = _make_task_dir(settings.tmp_dir, task_id) / "media.bin"
+    media = _make_task_dir(settings.media_dir, task_id, b"v" * 4096) / "media.bin"
+    result_file = settings.results_dir / f"{task_id}.json"
+    result_file.write_text("{}", encoding="utf-8")
+    return scratch, media, result_file
+
+
+@pytest.mark.parametrize("status", [TaskStatus.succeeded, TaskStatus.failed])
+def test_prune_expired_tasks_removes_record_and_artifacts(tmp_path: Path, status: TaskStatus) -> None:
     settings = _settings_with_dirs(tmp_path)
     store = SQLiteTaskStore(settings.db_path)
     task = store.create(
         AnalyzeRequest(url="https://example.com/a", mode=AnalysisMode.summary, use_mock=True)
     )
+    if status == TaskStatus.succeeded:
+        store.set_succeeded(
+            task.task_id,
+            AnalysisResult(
+                mode=AnalysisMode.summary, transcript="t", output="o",
+                media=MediaInfo(source_url=task.request.url),
+            ),
+        )
+    else:
+        store.set_failed(task.task_id, "failed")
     _backdate_task(settings, task.task_id, hours=48)
-    _make_task_dir(settings.tmp_dir, task.task_id)
-    _make_task_dir(settings.media_dir, task.task_id, b"v" * 4096)
-    result_file = settings.results_dir / f"{task.task_id}.json"
-    result_file.write_text("{}", encoding="utf-8")
+    scratch, media, result_file = _make_task_artifacts(settings, task.task_id)
 
     report = prune_expired_tasks(store, settings, retention_hours=24)
 
     assert report.tasks_removed == 1
-    assert report.bytes_reclaimed >= 4096
+    assert report.bytes_reclaimed == 4198
     assert store.get(task.task_id) is None
+    assert not scratch.parent.exists()
+    assert not media.parent.exists()
     assert not result_file.exists()
-    assert not (settings.tmp_dir / task.task_id).exists()
-    assert not (settings.media_dir / task.task_id).exists()
 
 
-def test_prune_expired_tasks_keeps_recent_and_is_off_by_default(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status", [TaskStatus.queued, TaskStatus.running])
+def test_prune_expired_tasks_keeps_old_active_tasks(tmp_path: Path, status: TaskStatus) -> None:
     settings = _settings_with_dirs(tmp_path)
     store = SQLiteTaskStore(settings.db_path)
-    task = store.create(
-        AnalyzeRequest(url="https://example.com/a", mode=AnalysisMode.summary, use_mock=True)
-    )
+    task = store.create(AnalyzeRequest(url="https://example.com/a"))
+    if status == TaskStatus.running:
+        store.set_running(task.task_id)
+    _backdate_task(settings, task.task_id, hours=48)
+    artifacts = _make_task_artifacts(settings, task.task_id)
 
-    # 默认（retention_hours=0）不按时间淘汰历史：静默删用户记录比占磁盘更糟
-    assert run_cleanup(store, settings, retention_hours=0).tasks_removed == 0
-    assert store.get(task.task_id) is not None
+    report = run_cleanup(store, settings, retention_hours=24)
 
-    # 保留期 24 小时，而任务刚创建 → 不该被删
-    assert prune_expired_tasks(store, settings, retention_hours=24).tasks_removed == 0
+    assert report.tasks_removed == 0
+    assert report.bytes_reclaimed == 0
+    assert store.get(task.task_id).status == status
+    assert all(artifact.is_file() for artifact in artifacts)
+
+
+def test_prune_expired_tasks_keeps_old_task_with_recent_completion(tmp_path: Path) -> None:
+    settings = _settings_with_dirs(tmp_path)
+    store = SQLiteTaskStore(settings.db_path)
+    task = store.create(AnalyzeRequest(url="https://example.com/a"))
+    _backdate_task(settings, task.task_id, hours=48)
+    store.set_failed(task.task_id, "recently failed")
+    artifacts = _make_task_artifacts(settings, task.task_id)
+
+    report = prune_expired_tasks(store, settings, retention_hours=24)
+
+    assert report.tasks_removed == 0
+    assert report.bytes_reclaimed == 0
+    assert store.get(task.task_id).status == TaskStatus.failed
+    assert all(artifact.is_file() for artifact in artifacts)
+
+
+@pytest.mark.parametrize("retention_hours", [None, 0, -1])
+def test_prune_expired_tasks_disabled(tmp_path: Path, retention_hours: int | None) -> None:
+    settings = _settings_with_dirs(tmp_path)
+    store = SQLiteTaskStore(settings.db_path)
+    task = store.create(AnalyzeRequest(url="https://example.com/a"))
+    store.set_failed(task.task_id, "failed")
+    _backdate_task(settings, task.task_id, hours=48)
+    artifacts = _make_task_artifacts(settings, task.task_id)
+
+    report = run_cleanup(store, settings, retention_hours=retention_hours)
+
+    assert report.tasks_removed == 0
+    assert report.bytes_reclaimed == 0
     assert store.get(task.task_id) is not None
+    assert all(artifact.is_file() for artifact in artifacts)
 
 
 def test_prune_expired_tasks_uses_task_retention_setting(tmp_path: Path) -> None:
@@ -166,9 +218,9 @@ def test_prune_expired_tasks_uses_task_retention_setting(tmp_path: Path) -> None
     task = store.create(
         AnalyzeRequest(url="https://example.com/a", mode=AnalysisMode.summary, use_mock=True)
     )
+    store.set_failed(task.task_id, "failed")
     _backdate_task(settings, task.task_id, hours=2)
 
-    # 未显式传参时走 settings.task_retention_hours
     assert run_cleanup(store, settings).tasks_removed == 1
     assert store.get(task.task_id) is None
 

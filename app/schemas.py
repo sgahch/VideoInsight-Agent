@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -160,7 +160,13 @@ class TaskSummary(BaseModel):
     queue_position: int | None = None
 
 
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=20000)
+
+
 class ChatRequest(BaseModel):
+    history: list[ChatMessage] = Field(default_factory=list, max_length=40)
     question: str = Field(..., description="用户针对某个已完成任务转写稿提出的问题。")
     # 用户自备模型配置（可选）：提供时对话使用用户自己的 LLM，否则使用服务器配置
     llm_provider: str | None = Field(

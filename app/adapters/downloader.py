@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
 from time import sleep
+from uuid import uuid4
 
 import httpx
 
@@ -412,30 +413,28 @@ class DouyinShareDownloader:
         )
 
     def download_video(self, url: str, task_id: str) -> Path:
-        """按需下载完整视频（含画面，原画质）。
-
-        download_audio 为了省流量默认取低画质（只要音轨），因此**只有**它取的
-        就是原画质时才能复用；否则必须单独下原画质，避免把降质版当成「源视频」
-        交给用户。
-        """
-        video_id = self._resolve_video_id(url)
+        """获取原画质源视频，下载成功后再发布缓存。"""
         task_dir = self.tmp_dir / task_id
-        task_dir.mkdir(parents=True, exist_ok=True)
-        target = task_dir / f"{video_id}.video.mp4"
-        audio_copy = task_dir / f"douyin-{video_id}.mp4"
-        reusable = (
-            self._audio_ratio() == self.DEFAULT_VIDEO_RATIO
-            and audio_copy.is_file()
-            and audio_copy.stat().st_size >= self._MIN_VIDEO_BYTES
-        )
-        if reusable:
-            # 覆盖旧文件：删除失败不能中断（文件被占用/只读目录），copyfile 会直接覆盖。
-            _best_effort_unlink(target)
-            shutil.copyfile(audio_copy, target)
+        staged: Path | None = None
+        try:
+            # 一个任务对应一个链接，缓存命中时无需再次解析分享短链。
+            for cached in sorted(task_dir.glob("*.video.mp4")):
+                if cached.is_file() and cached.stat().st_size >= self._MIN_VIDEO_BYTES:
+                    return cached
+
+            video_id = self._resolve_video_id(url)
+            task_dir.mkdir(parents=True, exist_ok=True)
+            target = task_dir / f"{video_id}.video.mp4"
+            item = self._fetch_item(video_id)
+            staged = task_dir / f"{video_id}.{uuid4().hex}.part"
+            self._download_mp4(item, staged, ratio=self.DEFAULT_VIDEO_RATIO)
+            staged.replace(target)
             return target
-        item = self._fetch_item(video_id)
-        self._download_mp4(item, target, ratio=self.DEFAULT_VIDEO_RATIO)
-        return target
+        except OSError as exc:
+            raise WorkflowError("无法保存抖音源视频，请检查磁盘空间和目录权限后重试。") from exc
+        finally:
+            if staged is not None:
+                _best_effort_unlink(staged)
 
     def _resolve_video_id(self, url: str) -> str:
         """从任意抖音分享形态解析视频 ID（短链在 normalize_url 内部解析）。"""

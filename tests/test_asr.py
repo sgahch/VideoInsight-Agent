@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 import threading
 import types
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from app.adapters import asr
 from app.adapters.asr import ParaformerTranscriber
 from app.config import Settings
 from app.errors import WorkflowError
@@ -315,6 +317,188 @@ def test_new_transcription_clears_previous_permission_failure(monkeypatch, tmp_p
         transcriber.transcribe(source, "first")
     monkeypatch.setattr(FakeRecognition, "call", original_call)
     assert transcriber.transcribe(source, "second")[0].text == "chunk-0"
+
+
+@pytest.fixture
+def decoder_process(monkeypatch):
+    processes = []
+    popen = subprocess.Popen
+
+    def install(script, *, fail_after_first_read=False):
+        def simulate_ffmpeg(_cmd, **kwargs):
+            proc = popen([sys.executable, "-B", "-c", script], **kwargs)
+            processes.append(proc)
+            if fail_after_first_read:
+                original_read = proc.stdout.read
+                read_once = False
+
+                def read(size):
+                    nonlocal read_once
+                    if read_once:
+                        raise OSError("pipe read failed")
+                    read_once = True
+                    return original_read(size)
+
+                proc.stdout.read = read
+            return proc
+
+        monkeypatch.setattr(asr, "resolve_ffmpeg", lambda: "ffmpeg")
+        monkeypatch.setattr(asr.subprocess, "Popen", simulate_ffmpeg)
+
+    yield install, processes
+    for proc in processes:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
+        proc.stderr.close()
+
+
+@pytest.mark.parametrize("legacy_fails", [False, True])
+def test_partial_decoder_output_retries_full_audio_or_fails(
+    monkeypatch, tmp_path: Path, decoder_process, legacy_fails: bool,
+) -> None:
+    install_decoder, processes = decoder_process
+    install_decoder(
+        "import sys; sys.stdout.buffer.write(bytes(32000)); "
+        "sys.stderr.write('corrupt audio'); sys.exit(1)"
+    )
+    _install_fake_dashscope(monkeypatch)
+    monkeypatch.setattr(asr, "audio_duration", lambda _path: 300)
+    source = tmp_path / "source.wav"
+    _make_wav(source, 300)
+    settings = replace(_chunked_settings(tmp_path), dashscope_asr_chunk_seconds=60)
+
+    class Preprocessor(FakePreprocessor):
+        def convert_to_wav16k(self, input_audio, output_wav):
+            assert list(tmp_path.glob("task-asr-*.wav")) == []
+            if legacy_fails:
+                output_wav.write_bytes(b"partial output")
+                raise WorkflowError("legacy decoder also failed")
+            return super().convert_to_wav16k(input_audio, output_wav)
+
+    transcriber = ParaformerTranscriber(settings, Preprocessor())
+    if legacy_fails:
+        with pytest.raises(WorkflowError, match="legacy decoder also failed"):
+            transcriber.transcribe(source, "task")
+    else:
+        segments = transcriber.transcribe(source, "task")
+        assert [segment.start for segment in segments] == [0, 60, 120, 180, 240]
+
+    [proc] = processes
+    assert proc.returncode == 1
+    assert proc.stdout.closed and proc.stderr.closed
+    assert list(tmp_path.glob("task-*.wav")) == []
+
+
+def test_decoder_read_failure_cleans_up_submitted_chunk(monkeypatch, tmp_path: Path, decoder_process) -> None:
+    install_decoder, processes = decoder_process
+    install_decoder(
+        "import sys, time; sys.stdout.buffer.write(bytes(32000)); "
+        "sys.stdout.flush(); time.sleep(30)",
+        fail_after_first_read=True,
+    )
+    transcriber = ParaformerTranscriber(_chunked_settings(tmp_path))
+    with pytest.raises(WorkflowError, match="pipe read failed"):
+        transcriber._transcribe_concurrent(tmp_path / "source.wav", "task", FakeRecognition, 1)
+
+    [proc] = processes
+    assert proc.returncode is not None
+    assert proc.stdout.closed and proc.stderr.closed
+    assert list(tmp_path.glob("task-*.wav")) == []
+
+
+def test_decoder_failure_does_not_retry_failed_recognition(monkeypatch, tmp_path: Path, decoder_process) -> None:
+    install_decoder, _ = decoder_process
+    recognition_started = tmp_path / "recognition-started"
+    install_decoder(f"""
+import sys, time
+from pathlib import Path
+sys.stdout.buffer.write(bytes(32000))
+sys.stdout.flush()
+for _ in range(500):
+    if Path({str(recognition_started)!r}).exists():
+        break
+    time.sleep(0.01)
+sys.exit(1)
+""")
+    _install_fake_dashscope(monkeypatch)
+    monkeypatch.setattr(asr, "audio_duration", lambda _path: 300)
+
+    def denied(self, path):
+        recognition_started.touch()
+        return types.SimpleNamespace(status_code=403, code="AccessDenied.Unpurchased", message="denied")
+
+    monkeypatch.setattr(FakeRecognition, "call", denied)
+    transcriber = ParaformerTranscriber(_chunked_settings(tmp_path))
+    monkeypatch.setattr(
+        transcriber, "_transcribe_legacy",
+        lambda *args: pytest.fail("cloud recognition failure must not upload the audio again"),
+    )
+    with pytest.raises(WorkflowError, match="开通阿里云百炼"):
+        transcriber.transcribe(tmp_path / "source.wav", "task")
+    assert list(tmp_path.glob("task-*.wav")) == []
+
+
+def test_chunk_write_failure_cleans_up_decoder_and_written_chunks(
+    monkeypatch, tmp_path: Path, decoder_process,
+) -> None:
+    install_decoder, processes = decoder_process
+    install_decoder(
+        "import sys, time; sys.stdout.buffer.write(bytes(64000)); "
+        "sys.stdout.flush(); time.sleep(30)"
+    )
+    original_write = asr._write_wav16k
+
+    def write_chunk(path, data):
+        if path.name.endswith("0001.wav"):
+            path.write_bytes(b"partial WAV")
+            raise OSError("disk full")
+        original_write(path, data)
+
+    monkeypatch.setattr(asr, "_write_wav16k", write_chunk)
+    transcriber = ParaformerTranscriber(_chunked_settings(tmp_path))
+    with pytest.raises(WorkflowError, match="disk full"):
+        transcriber._transcribe_concurrent(tmp_path / "source.wav", "task", FakeRecognition, 1)
+
+    [proc] = processes
+    assert proc.returncode is not None
+    assert proc.stdout.closed and proc.stderr.closed
+    assert list(tmp_path.glob("task-*.wav")) == []
+
+
+@pytest.mark.parametrize("failure", ["split", "reporter"])
+def test_legacy_failure_removes_written_audio(monkeypatch, tmp_path: Path, failure: str) -> None:
+    _install_fake_dashscope(monkeypatch)
+    source = tmp_path / "source.wav"
+    _make_wav(source, 3)
+    monkeypatch.setattr(asr, "audio_duration", lambda _path: None)
+
+    reporter = None
+    if failure == "split":
+        original_write = wave.Wave_write.writeframes
+        writes = 0
+
+        def writeframes(self, data):
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                original_write(self, data[:2])
+                raise OSError("split failed")
+            original_write(self, data)
+
+        monkeypatch.setattr(wave.Wave_write, "writeframes", writeframes)
+    else:
+        def report(*args):
+            raise OSError("reporter failed")
+
+        reporter = types.SimpleNamespace(mark_transcribe_started=report)
+
+    transcriber = ParaformerTranscriber(_chunked_settings(tmp_path), FakePreprocessor())
+    with pytest.raises(OSError, match=f"{failure} failed"):
+        transcriber.transcribe(source, "task", reporter)
+
+    assert list(tmp_path.glob("task-*.wav")) == []
 
 
 def test_local_decoder_failure_still_uses_legacy_fallback(monkeypatch, tmp_path: Path) -> None:

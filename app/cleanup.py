@@ -175,7 +175,7 @@ def prune_expired_tasks(
         return report
 
     cutoff = datetime.now() - timedelta(hours=retention_hours)
-    for task_id in store.delete_created_before(cutoff):
+    for task_id in store.delete_terminal_before(cutoff):
         report.tasks_removed += 1
         report.bytes_reclaimed += remove_task_artifacts(settings, task_id)
     if report.tasks_removed:

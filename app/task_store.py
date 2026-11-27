@@ -72,10 +72,10 @@ class SQLiteTaskStore:
         conn.execute(_INDEX_CLIENT_ID)
         conn.execute(_INDEX_CLIENT_HISTORY)
 
-    def create(self, request: AnalyzeRequest) -> TaskRecord:
+    def create(self, request: AnalyzeRequest, *, task_id: str | None = None) -> TaskRecord:
         now = datetime.now()
         task = TaskRecord(
-            task_id=uuid4().hex,
+            task_id=task_id or uuid4().hex,
             status=TaskStatus.queued,
             request=request,
             created_at=now,
@@ -271,29 +271,32 @@ class SQLiteTaskStore:
                 conn.close()
         return {row["task_id"] for row in rows}
 
-    def delete_created_before(self, cutoff: datetime) -> list[str]:
-        """删除创建时间早于 cutoff 的任务记录，返回被删的 task_id。
-
-        刻意分成「先查再删」两步：调用方拿到 id 才能一并清掉磁盘上的产物，
-        否则记录没了、目录还在，反而变成回收器要处理的孤儿。
-        created_at 存的是 isoformat(timespec="seconds")，文本比较对 ISO 时间安全。
-        """
-        stamp = cutoff.isoformat(timespec="seconds")
+    def delete_terminal_before(self, cutoff: datetime) -> list[str]:
+        """Delete terminal tasks last updated before cutoff and return the deleted IDs."""
+        expired = "status IN (?, ?) AND updated_at < ?"
+        params = (
+            TaskStatus.succeeded.value,
+            TaskStatus.failed.value,
+            cutoff.isoformat(timespec="seconds"),
+        )
+        deleted_ids: list[str] = []
         with self._lock:
             conn = self._connect()
             try:
-                rows = conn.execute(
-                    "SELECT task_id FROM tasks WHERE created_at < ?", (stamp,)
-                ).fetchall()
-                task_ids = [row["task_id"] for row in rows]
-                if task_ids:
-                    conn.executemany(
-                        "DELETE FROM tasks WHERE task_id = ?", [(task_id,) for task_id in task_ids]
+                # Acquire the write lock before selecting candidates.
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(f"SELECT task_id FROM tasks WHERE {expired}", params).fetchall()
+                for row in rows:
+                    task_id = row["task_id"]
+                    cursor = conn.execute(
+                        f"DELETE FROM tasks WHERE task_id = ? AND {expired}", (task_id, *params)
                     )
-                    conn.commit()
+                    if cursor.rowcount:
+                        deleted_ids.append(task_id)
+                conn.commit()
             finally:
                 conn.close()
-        return task_ids
+        return deleted_ids
 
     def _update(self, task_id: str, **updates: object) -> None:
         fields: dict[str, object] = {}

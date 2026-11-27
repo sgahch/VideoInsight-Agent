@@ -6,13 +6,15 @@
   <title>评论中心 · VideoInsight</title>
   <link rel="stylesheet" href="/static/comments.css?v=20261105">
   <script defer src="/static/comment-utils.js?v=20261105"></script>
-  <script defer src="/static/comments.js?v=20261105"></script>
+  <script defer src="/static/client-identity.js?v=20261127"></script>
+  <script defer src="/static/comments.js?v=20261127-client-identity1"></script>
 </head>
 <body>
   <header class="topbar"><a class="brand" href="/">V<span>VideoInsight</span></a><a href="/">← 返回视频分析</a></header>
   <main>
     <div class="intro"><p class="eyebrow">COMMENTS / 评论中心</p><h1>把讨论，也看完整。</h1><p>抖音、快手、B站、小红书 · 一级评论与子评论逐页采集</p></div>
     <p id="notice" role="status" aria-live="polite" hidden></p>
+    <p id="storageNotice" role="status" aria-live="polite" hidden></p>
     <section class="panel" aria-labelledby="loginTitle">
       <div class="section-head"><h2 id="loginTitle">平台登录</h2><span class="muted">Cookies 仅保存在服务器，不回传浏览器</span></div>
       <div id="platforms" class="platforms"></div>

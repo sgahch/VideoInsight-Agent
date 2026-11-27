@@ -363,20 +363,14 @@ def test_download_mp4_rejects_tiny_response(cookies_env, monkeypatch, tmp_path: 
     assert not list(task_dir.glob("*.mp4"))
 
 
-def test_download_video_reuses_existing_audio_file(cookies_env, monkeypatch, tmp_path: Path) -> None:
-    # 只有当「转写下载的画质」就是原画质时才能复用（否则会把降质版当源视频）。
-    monkeypatch.setattr(
-        DouyinShareDownloader,
-        "_audio_ratio",
-        lambda self: DouyinShareDownloader.DEFAULT_VIDEO_RATIO,
-    )
+@pytest.mark.parametrize("url", [f"https://www.douyin.com/video/{VIDEO_ID}", "https://v.douyin.com/test/"])
+def test_download_video_reuses_dedicated_video_cache(monkeypatch, tmp_path: Path, url: str) -> None:
     tmp_dir = tmp_path / "tmp"
     task_dir = tmp_dir / "task1"
     task_dir.mkdir(parents=True)
-    existing = task_dir / f"douyin-{VIDEO_ID}.mp4"
+    existing = task_dir / f"{VIDEO_ID}.video.mp4"
     existing.write_bytes(_big_bytes())
 
-    # 复用成功时不应再请求分享页/下载
     def boom(*args, **kwargs):
         raise AssertionError("应复用已下载文件，不应发起网络请求")
 
@@ -384,14 +378,22 @@ def test_download_video_reuses_existing_audio_file(cookies_env, monkeypatch, tmp
     monkeypatch.setattr(downloader_module.httpx, "stream", boom)
 
     video_path = DouyinShareDownloader(tmp_dir).download_video(
-        f"https://www.douyin.com/video/{VIDEO_ID}", "task1"
+        url, "task1"
     )
 
-    assert video_path.name == f"{VIDEO_ID}.video.mp4"
+    assert video_path == existing
     assert video_path.read_bytes() == _big_bytes()
 
 
-def test_download_video_downloads_when_missing(cookies_env, monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("initial_cache", [None, b"incomplete"], ids=["missing", "too-small"])
+def test_download_video_refreshes_missing_or_incomplete_cache(
+    cookies_env, monkeypatch, tmp_path: Path, initial_cache: bytes | None
+) -> None:
+    task_dir = tmp_path / "tmp" / "task2"
+    if initial_cache is not None:
+        task_dir.mkdir(parents=True)
+        (task_dir / f"{VIDEO_ID}.video.mp4").write_bytes(initial_cache)
+
     _patch_share_page(monkeypatch, _share_item())
     play_url = DouyinShareDownloader.PLAY_URL.format(
         uri="v0d00fg10000da9afifog65s10jv8vk0",
@@ -403,15 +405,19 @@ def test_download_video_downloads_when_missing(cookies_env, monkeypatch, tmp_pat
     video_path = downloader.download_video(f"https://www.douyin.com/video/{VIDEO_ID}", "task2")
 
     assert video_path.name == f"{VIDEO_ID}.video.mp4"
-    assert video_path.stat().st_size >= 10_000
+    assert video_path.read_bytes() == _big_bytes()
 
 
-def test_download_video_does_not_reuse_downgraded_audio(cookies_env, monkeypatch, tmp_path: Path) -> None:
-    """转写默认下低画质，源视频必须重新下原画质，不能把降质版当成源视频。"""
+@pytest.mark.parametrize("current_ratio", ["480p", "1080p"])
+def test_download_video_does_not_reuse_downgraded_audio(
+    cookies_env, monkeypatch, tmp_path: Path, current_ratio: str
+) -> None:
+    monkeypatch.setattr(DouyinShareDownloader, "_audio_ratio", lambda self: current_ratio)
     tmp_dir = tmp_path / "tmp"
     task_dir = tmp_dir / "task3"
     task_dir.mkdir(parents=True)
-    (task_dir / f"douyin-{VIDEO_ID}.mp4").write_bytes(_big_bytes())
+    audio_copy = task_dir / f"douyin-{VIDEO_ID}.mp4"
+    audio_copy.write_bytes(_big_bytes() + b"older 480p media")
 
     _patch_share_page(monkeypatch, _share_item())
     high_url = DouyinShareDownloader.PLAY_URL.format(
@@ -426,4 +432,59 @@ def test_download_video_does_not_reuse_downgraded_audio(cookies_env, monkeypatch
     )
 
     assert video_path.name == f"{VIDEO_ID}.video.mp4"
-    assert video_path.stat().st_size >= 10_000
+    assert video_path.read_bytes() == _big_bytes()
+    assert audio_copy.read_bytes() == _big_bytes() + b"older 480p media"
+
+
+def test_download_video_hides_unvalidated_files_from_overlapping_downloads(
+    cookies_env, monkeypatch, tmp_path: Path
+) -> None:
+    _patch_share_page(monkeypatch, _share_item())
+    downloader = DouyinShareDownloader(tmp_path)
+    task_dir = tmp_path / "task1"
+    url = f"https://www.douyin.com/video/{VIDEO_ID}"
+    cached_file = task_dir / f"{VIDEO_ID}.video.mp4"
+    second_payload = _big_bytes() + b"second complete video"
+
+    class OverlappingStream(FakeStreamResponse):
+        def iter_bytes(self, chunk_size: int):
+            yield _big_bytes()
+            assert not list(task_dir.glob("*.video.mp4"))
+            assert downloader.download_video(url, "task1").read_bytes() == second_payload
+            yield b"first complete video"
+
+    responses = iter([OverlappingStream([]), FakeStreamResponse([second_payload])])
+    monkeypatch.setattr(
+        downloader_module.httpx, "stream", lambda *args, **kwargs: FakeStreamContext(next(responses))
+    )
+
+    assert downloader.download_video(url, "task1") == cached_file
+    assert cached_file.read_bytes() in (_big_bytes() + b"first complete video", second_payload)
+    assert list(task_dir.iterdir()) == [cached_file]
+
+
+@pytest.mark.parametrize("local_error", [False, True], ids=["upstream", "local"])
+def test_download_video_failure_leaves_no_cache_or_partial_files(
+    cookies_env, monkeypatch, tmp_path: Path, local_error: bool
+) -> None:
+    _patch_share_page(monkeypatch, _share_item())
+    monkeypatch.setattr(downloader_module, "sleep", lambda seconds: None)
+    downloader = DouyinShareDownloader(tmp_path)
+    task_dir = tmp_path / "task1"
+
+    class BrokenStream(FakeStreamResponse):
+        def iter_bytes(self, chunk_size: int):
+            yield _big_bytes()
+            if local_error:
+                raise OSError("simulated local write failure")
+            assert not list(task_dir.glob("*.video.mp4"))
+            raise downloader_module.httpx.ReadError("simulated interrupted download")
+
+    monkeypatch.setattr(
+        downloader_module.httpx, "stream", lambda *args, **kwargs: FakeStreamContext(BrokenStream([]))
+    )
+
+    with pytest.raises(WorkflowError):
+        downloader.download_video(f"https://www.douyin.com/video/{VIDEO_ID}", "task1")
+
+    assert not list(task_dir.iterdir())

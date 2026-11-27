@@ -63,6 +63,16 @@ def account_owner() -> str | None:
     return _owner.get()
 
 
+def account_identity(account: Account | None) -> str | None:
+    """账号身份标识：管理员为 `admin:<username>`，普通用户为 `account:<user_id>`。
+
+    与 local_login._identity 保持一致；前端据此隔离模型配置等浏览器本地数据。
+    """
+    if account is None:
+        return None
+    return account.owner or f"admin:{account.username}"
+
+
 def is_account_owner(owner: str | None) -> bool:
     return bool(
         owner and owner.startswith(ACCOUNT_OWNER_PREFIX)
@@ -229,6 +239,7 @@ def current_account(request: Request, response: Response) -> dict[str, object]:
     return {
         "login_required": login_required(), "authenticated": account is not None,
         "username": account.username if account else None,
+        "account_id": account_identity(account),
         "is_admin": account.is_admin if account else False,
         "registration_available": registration_available(settings),
         "password_reset_available": password_email_available(settings),

@@ -5,11 +5,13 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>VideoInsight Agent - 沉浸式 AI 视频分析平台</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261115-helper1" />
+  <link rel="stylesheet" href="/static/styles.css?v=20261126-upload1" />
   <link rel="stylesheet" href="/static/queue.css?v=20261106-used1" />
 </head>
 
 <body>
+
+  <div id="storageNotice" role="status" aria-live="polite" hidden></div>
 
   <div class="app-layout">
 
@@ -181,7 +183,7 @@
                 </svg>
               </div>
               <strong id="fileName" class="drop-title">点击或拖入音视频文件</strong>
-              <small class="drop-sub">支持 mp3 / mp4 / m4a / wav</small>
+              <small class="drop-sub">支持 mp3 / mp4 / m4a / wav · 支持断点续传</small>
             </label>
 
             <div class="form-group mt-14">
@@ -202,6 +204,15 @@
             </div>
 
             <button id="uploadSubmit" type="submit" class="btn full-width">上传并入队</button>
+            <div id="uploadProgress" class="upload-progress-panel" hidden>
+              <p id="uploadProgressText" class="upload-progress-text" role="status" aria-live="polite"></p>
+              <progress id="uploadProgressBar" class="upload-progress-bar" max="100" value="0" aria-label="文件上传进度"></progress>
+            </div>
+            <p id="uploadResumeHint" class="upload-resume-hint" hidden></p>
+            <div class="upload-actions">
+              <button id="uploadPause" type="button" class="mini-btn" hidden>暂停</button>
+              <button id="uploadCancel" type="button" class="mini-btn" hidden>取消上传</button>
+            </div>
           </form>
         </div>
 
@@ -476,7 +487,7 @@
           <div class="privacy-tip-body">
             <strong>你的 Key 是安全的</strong>
             <ul>
-              <li>Key 仅保存在<strong>你自己的浏览器</strong>（localStorage），关闭页面后仍保留，随时可清除。</li>
+              <li>Key 保存在当前浏览器，可随时清除。启用账号登录时按账号保存，退出登录会清除该账号的 Key。</li>
               <li>使用时仅作为一次性请求参数发送给本项目服务，用于调用<strong>你指定的模型接口</strong>，服务端<strong>不会存储、不会记录、不会上传到任何第三方</strong>。</li>
               <li>你可以随时清除 Key；清除后逐字稿提取仍可正常使用。</li>
             </ul>
@@ -569,7 +580,9 @@
   <script src="/static/comment-utils.js?v=20261105"></script>
   <script src="/static/queue.js?v=20261106-used1"></script>
   <script src="/static/local-login.js?v=20261116-helper101"></script>
-  <script src="/static/app.js?v=20261116-helper101"></script>
+  <script src="/static/client-identity.js?v=20261127"></script>
+  <script src="/static/resumable-upload.js?v=20261126-upload1"></script>
+  <script src="/static/app.js?v=20261127-account-identity1"></script>
 </body>
 
 </html>

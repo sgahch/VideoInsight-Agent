@@ -16,7 +16,7 @@ from app.config import settings
 from app.account_auth import ACCOUNT_OWNER_PREFIX, _check_origin, account_owner, login_required, router as account_router
 from app.comments_api import private_service_params, router as comments_router, service_request
 from app.adapters.asr import format_transcript
-from app.adapters.downloader import YtDlpDownloader, browser_cookie_fallback_allowed, cookie_storage_path, resolve_cookies_file, select_downloader
+from app.adapters.downloader import YtDlpDownloader, browser_cookie_fallback_allowed, cookie_storage_path, is_douyin_url, resolve_cookies_file, select_downloader
 from app.adapters.llm import MockLlmAnalyzer, OpenAICompatibleAnalyzer
 from app.browser_cookies import BrowserCookieError, capture_douyin_cookies, cookie_browser_capabilities, cookie_browser_status, start_cookie_browser
 from app.cookies import summarize_cookie_file, write_normalized_cookie_file
@@ -52,6 +52,7 @@ from app.task_queue import PendingTask, TaskQueue, TaskQueueFull, TaskRunning, r
 from app.workflow import detect_platform, format_duration, run_analysis_task, run_file_analysis_task
 from app.progress import get_snapshot
 from app.streaming import STREAM_HEADERS, encode_event
+from app.uploads import UploadInit, UploadOptions, UploadStore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -124,6 +125,7 @@ def _resume_task(item: PendingTask) -> None:
 def _run_artifact_cleanup() -> None:
     """同步执行一次产物回收，失败只记日志——回收绝不能影响服务启动。"""
     try:
+        UploadStore(settings).cleanup_expired()
         report = run_cleanup(task_store, settings)
     except Exception as exc:  # noqa: BLE001 - 回收是尽力而为的后台动作
         LOGGER.warning("产物回收失败，已跳过：%s", exc)
@@ -422,6 +424,66 @@ def submit_file_analysis(
     )
 
 
+@app.get("/uploads/config")
+def upload_configuration() -> dict[str, int]:
+    uploads = UploadStore(settings)
+    return {
+        "max_file_size": settings.max_upload_mb * 1024 * 1024,
+        "chunk_size": uploads.chunk_size,
+        "retention_hours": max(1, settings.upload_retention_hours),
+    }
+
+
+@app.post("/uploads", status_code=201)
+def initialize_upload(metadata: UploadInit, x_client_id: str | None = Header(default=None)) -> dict[str, object]:
+    return UploadStore(settings).create(metadata, _client_id_from_header(x_client_id))
+
+
+@app.get("/uploads/{upload_id}")
+def upload_status(upload_id: str, x_client_id: str | None = Header(default=None)) -> dict[str, object]:
+    return UploadStore(settings).status(upload_id, _client_id_from_header(x_client_id))
+
+
+@app.put("/uploads/{upload_id}/chunks/{index}")
+async def receive_upload_chunk(
+    upload_id: str, index: int, request: Request,
+    x_chunk_sha256: str = Header(pattern=r"^[0-9a-f]{64}$"),
+    x_client_id: str | None = Header(default=None),
+) -> dict[str, object]:
+    owner = _client_id_from_header(x_client_id)
+    uploads = UploadStore(settings)
+    session = await asyncio.to_thread(uploads.status, upload_id, owner)
+    if not 0 <= index < session["total_chunks"]:
+        raise HTTPException(422, "分片序号无效。")
+    expected = min(session["chunk_size"], session["size"] - index * session["chunk_size"])
+    data = bytearray()
+    async for block in request.stream():
+        if len(data) + len(block) > expected:
+            raise HTTPException(413, "分片超过规定长度。")
+        data.extend(block)
+    return await asyncio.to_thread(uploads.write_chunk, upload_id, owner, index, bytes(data), x_chunk_sha256)
+
+
+@app.post("/uploads/{upload_id}/complete", response_model=AnalyzeResponse, status_code=202)
+def complete_upload(
+    upload_id: str, options: UploadOptions, x_client_id: str | None = Header(default=None),
+) -> AnalyzeResponse:
+    def enqueue(task: TaskRecord, media_path: Path) -> None:
+        task_queue.submit(task.task_id, task_store, run_file_analysis_task, task.task_id, task.request, media_path, task_store)
+
+    try:
+        task = UploadStore(settings).complete(upload_id, _client_id_from_header(x_client_id), options, task_store, enqueue)
+    except TaskQueueFull as exc:
+        raise HTTPException(429, detail=str(exc), headers={"Retry-After": "3"}) from exc
+    return AnalyzeResponse(task_id=task.task_id, status=task.status, status_url=f"/tasks/{task.task_id}")
+
+
+@app.delete("/uploads/{upload_id}", status_code=204)
+def cancel_upload(upload_id: str, x_client_id: str | None = Header(default=None)) -> Response:
+    UploadStore(settings).cancel(upload_id, _client_id_from_header(x_client_id))
+    return Response(status_code=204)
+
+
 @app.post("/cookies")
 def upload_cookies(file: UploadFile = File(...)) -> dict[str, object]:
     target = _cookie_storage_path()
@@ -691,7 +753,7 @@ def chat_with_task(
     """
     llm, question, transcript, metadata = _prepare_task_chat(task_id, request, x_client_id)
     try:
-        answer = llm.chat(question, transcript, metadata=metadata)
+        answer = llm.chat(question, transcript, metadata=metadata, history=[m.model_dump() for m in request.history])
     except VideoInsightError as exc:
         raise HTTPException(status_code=502, detail=f"AI 对话失败：{exc}") from exc
     return ChatResponse(answer=answer)
@@ -738,7 +800,10 @@ def stream_task_chat(
 
     def events():
         try:
-            for text in llm.chat_stream(question, transcript, metadata=metadata):
+            for text in llm.chat_stream(
+                question, transcript, metadata=metadata,
+                history=[m.model_dump() for m in request.history],
+            ):
                 yield encode_event("delta", {"text": text})
             yield encode_event("done", {})
         except VideoInsightError as exc:
@@ -823,14 +888,17 @@ def get_task_video(
     x_client_id: str | None = Header(default=None, description="客户端身份标识（浏览器持久化 UUID）"),
     client_cookie: str | None = Cookie(default=None, alias=CLIENT_COOKIE_NAME),
 ) -> FileResponse:
-    """返回任务的完整视频：已存文件是视频时直接返回；链接任务只存了音频时按需下载源视频。"""
+    """返回完整视频；抖音转写缓存按需另取源视频，上传及其他已存视频直接返回。"""
     client_id = _client_id_from_media_request(x_client_id, client_cookie)
     task = _owned_task(task_id, client_id)
     stored = _resolve_media_path(task)
     if stored is None:
         raise HTTPException(status_code=404, detail="Media not found")
 
-    if _is_video_extension(stored) or str(task.request.url).startswith("upload://"):
+    url = str(task.request.url)
+    # Douyin transcription files are MP4 containers at reduced quality. Route
+    # source requests through download_video, which handles full-quality reuse.
+    if url.startswith("upload://") or (_is_video_extension(stored) and not is_douyin_url(url)):
         return _media_response(stored, download)
 
     try:
@@ -864,9 +932,9 @@ def _media_response(path: Path, download: bool) -> FileResponse:
 def _ensure_source_video(task: TaskRecord, stored: Path) -> Path:
     task_dir = stored.parent
     cached = sorted(task_dir.glob("*.video.mp4"))
-    if cached:
-        return cached[0]
     url = str(task.request.url)
+    if cached and not is_douyin_url(url):
+        return cached[0]
     # 抖音链接走分享页下载器（yt-dlp 被 a_bogus 签名墙拦截）；其余平台维持 yt-dlp。
     downloader = select_downloader(url, settings.tmp_dir, use_mock=False)
     if not hasattr(downloader, "download_video"):

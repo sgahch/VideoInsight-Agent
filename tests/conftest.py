@@ -4,9 +4,31 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 TERMINAL_STATUSES = {"succeeded", "failed"}
+
+
+@pytest.fixture(autouse=True)
+def _tests_run_without_auth(monkeypatch):
+    """默认关闭账号登录与共享令牌，让测试不受开发者本地 .env 鉴权配置影响。
+
+    需要鉴权的用例（test_security、test_account_auth、test_registration 等）会
+    在各自 fixture 里显式重新 patch 对应模块的 settings，覆盖这里的默认值。
+    """
+    from dataclasses import replace
+
+    import app.account_auth as account_auth
+    import app.main as main_module
+    import app.security as security_module
+
+    for module in (main_module, security_module, account_auth):
+        monkeypatch.setattr(
+            module,
+            "settings",
+            replace(module.settings, auth_token=None, auth_password_hash=None),
+        )
 
 
 def wait_for_task(

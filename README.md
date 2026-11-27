@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Tests](https://img.shields.io/badge/tests-776%20passed-2EA44F?style=flat-square&logo=pytest&logoColor=white)](./tests)
+[![Tests](https://img.shields.io/badge/tests-793%20passed-2EA44F?style=flat-square&logo=pytest&logoColor=white)](./tests)
 [![ASR](https://img.shields.io/badge/ASR-DashScope%20Paraformer-FF6A00?style=flat-square)](https://dashscope.aliyuncs.com/)
 
 </div>
@@ -22,7 +22,7 @@
 | 🧠 | **AI 总结** | 结构化摘要；另有 `interview` 模式专门做面经/知识点提取 |
 | 💬 | **观众评论** | 独立评论中心支持分页、回复与导出；未部署服务时可降级为热门样本 |
 | 🤖 | **AI 追问** | 针对已完成的任务继续提问，模型只依据该视频的转写稿作答 |
-| 📤 | **本地上传** | 拖进音频/视频文件即可分析，绕开一切平台风控 |
+| 📤 | **本地上传** | 分片上传、暂停与断点续传，上传完成后进入分析队列 |
 | 🗂️ | **历史与隔离** | SQLite 持久化；注册用户按签名账号隔离，跨设备访问自己的任务 |
 | 🔑 | **账号安全** | 邮箱验证码注册、忘记密码与修改密码；管理员与普通用户独立授权 |
 | | **本地登录助手** | Windows 打开独立抖音窗口，登录后自动保存到当前网站账号；手机保留扫码与导入 |
@@ -173,7 +173,13 @@ curl -X POST http://127.0.0.1:8000/tasks/<task_id>/chat `
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | `POST` | `/analyze` | 提交链接分析 |
-| `POST` | `/analyze-file` | 上传本地文件分析 |
+| `POST` | `/analyze-file` | 整文件上传分析（保留兼容） |
+| `GET` | `/uploads/config` | 查询上传大小上限、分片大小和保留期 |
+| `POST` | `/uploads` | 初始化分片上传；支持初始化幂等标识 |
+| `GET` | `/uploads/{id}` | 查询已确认分片，刷新或重启后恢复 |
+| `PUT` | `/uploads/{id}/chunks/{index}` | 上传单个分片，校验内容并支持重复请求 |
+| `POST` | `/uploads/{id}/complete` | 校验合并文件并提交分析；重复完成返回同一任务 |
+| `DELETE` | `/uploads/{id}` | 取消未完成上传并清理分片 |
 | `POST` | `/parse-link` | 从分享文案解析干净链接与标签 |
 | `GET` | `/tasks` | 历史任务列表（按客户端身份隔离） |
 | `GET` | `/tasks/{id}` | 查询任务与结果 |
@@ -347,6 +353,30 @@ curl -X POST http://127.0.0.1:8000/analyze-file `
 
 文件暂存于 `media/<task_id>/`。
 
+网页上传使用分片协议：默认每片 4 MiB，最多 3 片并发。传输前逐块计算完整
+SHA-256，每个分片也单独校验；失败分片最多自动重试 3 次，进度按服务端已确认字节显示。
+可以暂停后继续。刷新页面或服务重启后，重新选择原文件并点击上传，会跳过已确认分片。
+浏览器不会在刷新后自动重新读取本地文件，需要用户再次选择；相同文件名但内容不同的文件不会混传。
+
+未完成会话默认保留 24 小时，每个身份最多保留 4 个未完成上传，声明的总文件大小
+最多为单文件上限的 2 倍。取消上传会释放分片和配额；过期分片在新建上传、启动及周期清理时回收。
+上传状态和分片保存在 `data/tmp/_uploads/<upload_id>/`，请在容器部署中持久化临时目录。
+在现有单服务任务队列部署中，重复完成请求返回同一任务；队列满时保留分片，允许稍后继续提交。
+上传模型参数只在完成请求传递，密钥不写入上传会话。
+
+第三方接入顺序：
+
+1. `POST /uploads`，JSON 包含 `filename`、`size`（字节）、完整文件的 `sha256`。
+   可带 32 位小写十六进制 `idempotency_key`，重试时复用相同值。
+2. 根据响应的 `chunk_size` 和 `uploaded_chunks`，向缺失的分片序号发送
+   `PUT /uploads/{id}/chunks/{index}`。请求体为原始字节，
+   `Content-Type: application/octet-stream`，`X-Chunk-SHA256` 为该分片的 SHA-256。
+3. `POST /uploads/{id}/complete`，JSON 包含 `mode`、`use_mock` 及可选模型配置；
+   成功返回 `202` 和原有格式的 `task_id`、`status_url`。
+
+这些接口沿用现有账号会话、共享令牌和客户端归属。上传续传仅恢复文件传输；
+转写、AI 分析任务中断后的处理仍遵循任务队列原有的重启对账规则。
+
 </details>
 
 <details>
@@ -490,6 +520,9 @@ Key 仅保存在 Git 忽略的 `.env`，不会通过健康检查或任务诊断�
 | `VIDEOINSIGHT_MEDIA_DIR` | `media` | 媒体与 Cookies 目录 |
 | `VIDEOINSIGHT_DB_PATH` | `data/videoinsight.db` | SQLite 路径 |
 | `VIDEOINSIGHT_MAX_UPLOAD_MB` | `2048` | 单个上传文件大小上限 |
+| `VIDEOINSIGHT_UPLOAD_CHUNK_BYTES` | `4194304` | 分片大小（字节），服务端最大允许 16 MiB |
+| `VIDEOINSIGHT_UPLOAD_RETENTION_HOURS` | `24` | 未完成上传保留时长（至少 1 小时） |
+| `VIDEOINSIGHT_MAX_PENDING_UPLOADS` | `4` | 每个身份的未完成上传数量上限 |
 | `VIDEOINSIGHT_AUTH_TOKEN` | — | 可选共享访问令牌；有效账号会话也可鉴权，不设置不会关闭其他登录保护 |
 | `VIDEOINSIGHT_TASK_CORE_WORKERS` | `2` | 核心任务并发；不会超过最大并发 |
 | `VIDEOINSIGHT_MAX_CONCURRENT_TASKS` | `4` | 等待队列满时允许扩展到的最大任务并发 |
@@ -618,6 +651,7 @@ app/
   url_safety.py            公网目标验证、DNS 固定与原域名 TLS 校验
   workflow.py              固定工作流编排
   task_store.py            SQLite 持久化任务存储
+  uploads.py               分片校验、上传状态持久化、合并提交与过期回收
   schemas.py               请求、任务和结果模型
   config.py                环境配置
   prompts.py               LLM Prompt 模板
@@ -639,6 +673,7 @@ web/
   index.html / app.js / styles.css   前端页面
   account.* / login.* / auth-common.js   登录、注册与账号安全
   local-login.js                     助手调用与可恢复的状态轮询
+  resumable-upload.js                流式文件指纹、并发上传、暂停重试与续传
 local_helper/                        Windows 助手、协议安装与构建
 tests/                               Python、Node 与真实浏览器回归
 verify_real_chain.py                 真实链路验证脚本
@@ -654,8 +689,12 @@ docs/                                集成评估、评论数据产出、参赛�
 ```powershell
 pip install pytest
 pytest --basetemp=_pytest_tmp -q
-node --test tests/local-login.test.cjs tests/comment-utils.test.cjs
+node --test tests/*.test.cjs
 ```
+
+2026-11-26 分片上传变更在隔离环境完成验证：默认 Python 测试 **793 passed / 7 skipped**，
+Node 测试 **17 passed**。另用 Ego 浏览器验证暂停、刷新、服务重启及网络中断后的恢复，
+确认跳过已上传分片、只创建一个分析任务，以及取消清理和 390px 布局。
 
 2026-11-16 正式测试目录完整验证为 **776 passed / 0 failed**，
 另有 **41 项部署脚本测试**和 **5 项 Node 测试**通过。

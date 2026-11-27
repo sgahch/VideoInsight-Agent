@@ -95,6 +95,26 @@ class _RetryableEndpointError(Exception):
     """端点层面不可用（404/405 或返回非 JSON），可换候选地址重试。"""
 
 
+def _json_truncation_reason(data: dict[str, Any], protocol: str) -> str | None:
+    if protocol == PROTOCOL_MESSAGES:
+        return "max_tokens" if data.get("stop_reason") == "max_tokens" else None
+    if protocol != PROTOCOL_CHAT_COMPLETIONS:
+        return None
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    reason = choices[0].get("finish_reason")
+    return reason if reason in ("length", "content_filter") else None
+
+
+def _truncation_error(reason: str) -> WorkflowError:
+    if reason == "content_filter":
+        return WorkflowError("LLM 内容过滤中止了生成（content_filter）。请调整输入内容后重试。")
+    return WorkflowError(
+        f"LLM 输出达到长度上限（{reason}）。请缩短所需输出或提高输出上限后重试。"
+    )
+
+
 class _SecretRedactor:
     def __init__(self, secrets: tuple[str, ...]) -> None:
         self.secrets = secrets
@@ -174,6 +194,7 @@ AI 产品经理岗位 [示例]
         question: str,
         transcript: str,
         metadata: dict[str, Any] | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> str:
         title = (metadata or {}).get("video_title") or "未命名视频"
         excerpt = transcript.strip()[:30] or "（转写稿为空）"
@@ -191,8 +212,9 @@ AI 产品经理岗位 [示例]
 
     def chat_stream(
         self, question: str, transcript: str, metadata: dict[str, Any] | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> Iterator[str]:
-        yield self.chat(question, transcript, metadata=metadata)
+        yield self.chat(question, transcript, metadata=metadata, history=history)
 
 
 class OpenAICompatibleAnalyzer:
@@ -276,8 +298,9 @@ class OpenAICompatibleAnalyzer:
         question: str,
         transcript: str,
         metadata: dict[str, Any] | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> str:
-        prompt = build_chat_prompt(question, transcript, metadata=metadata)
+        prompt = build_chat_prompt(question, transcript, metadata=metadata, history=history)
         return self._complete(prompt)
 
     def analyze_stream(
@@ -295,8 +318,9 @@ class OpenAICompatibleAnalyzer:
 
     def chat_stream(
         self, question: str, transcript: str, metadata: dict[str, Any] | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> Iterator[str]:
-        yield from self._complete_stream(build_chat_prompt(question, transcript, metadata=metadata))
+        yield from self._complete_stream(build_chat_prompt(question, transcript, metadata=metadata, history=history))
 
     def _complete_stream(self, prompt: str) -> Iterator[str]:
         api_key = self._api_key_override or self._api_key()
@@ -314,6 +338,7 @@ class OpenAICompatibleAnalyzer:
     def _request_stream(self, url: str, api_key: str, prompt: str) -> Iterator[str]:
         payload = self._build_payload(prompt, None)
         payload["stream"] = True
+        protocol = self._protocol()
         redactor = self._redactor(api_key)
         try:
             with self._stream_response(url, api_key, payload) as response:
@@ -331,17 +356,24 @@ class OpenAICompatibleAnalyzer:
                         raise _RetryableEndpointError() from exc
                     if not isinstance(data, dict) or data.get("error"):
                         raise WorkflowError("LLM 返回内容异常，请检查模型与协议配置。")
+                    truncated_reason = _json_truncation_reason(data, protocol)
                     try:
                         text = self._extract_text(data)
                     except (KeyError, IndexError, TypeError) as exc:
-                        raise WorkflowError("LLM 返回内容格式异常，请检查接口协议。") from exc
-                    if not text.strip():
+                        if truncated_reason is None:
+                            raise WorkflowError("LLM 返回内容格式异常，请检查接口协议。") from exc
+                        text = ""
+                    if text.strip():
+                        yield redactor.redact(text)
+                    elif truncated_reason is None:
                         raise WorkflowError("LLM 返回了空内容，请稍后重试。")
-                    yield redactor.redact(text)
+                    if truncated_reason is not None:
+                        raise _truncation_error(truncated_reason)
                     return
 
                 finished = False
                 has_text = False
+                truncated_reason: str | None = None
                 for event, raw in iter_events(response.iter_lines()):
                     if raw == "[DONE]":
                         finished = True
@@ -356,24 +388,30 @@ class OpenAICompatibleAnalyzer:
                     if data.get("error") or kind in ("error", "response.failed", "response.incomplete"):
                         raise WorkflowError("LLM 生成未完成，请稍后重试。")
                     text = ""
-                    if self._protocol() == PROTOCOL_RESPONSES:
+                    if protocol == PROTOCOL_RESPONSES:
                         if kind == "response.output_text.delta":
                             text = data.get("delta", "")
                         elif kind == "response.completed":
                             finished = True
-                    elif self._protocol() == PROTOCOL_MESSAGES:
+                    elif protocol == PROTOCOL_MESSAGES:
                         if kind == "content_block_delta" and data.get("delta", {}).get("type") == "text_delta":
                             text = data["delta"].get("text", "")
                         elif kind == "content_block_start" and data.get("content_block", {}).get("type") == "text":
                             text = data["content_block"].get("text", "")
+                        elif kind == "message_delta" and (data.get("delta") or {}).get("stop_reason") == "max_tokens":
+                            truncated_reason = "max_tokens"
+                            finished = True
                         elif kind == "message_stop":
                             finished = True
                     else:
                         choices = data.get("choices") or []
                         if choices:
                             text = (choices[0].get("delta") or {}).get("content") or ""
-                            if choices[0].get("finish_reason") is not None:
+                            reason = choices[0].get("finish_reason")
+                            if reason is not None:
                                 finished = True
+                                if reason in ("length", "content_filter"):
+                                    truncated_reason = reason
                     if isinstance(text, str) and text:
                         has_text = True
                         safe_text = redactor.feed(text)
@@ -383,11 +421,13 @@ class OpenAICompatibleAnalyzer:
                         break
                 if not finished:
                     raise WorkflowError("LLM 连接意外中断，已保留生成的部分内容。")
-                if not has_text:
+                if not has_text and truncated_reason is None:
                     raise WorkflowError("LLM 返回了空内容，请稍后重试。")
                 remaining = redactor.finish()
                 if remaining:
                     yield remaining
+                if truncated_reason is not None:
+                    raise _truncation_error(truncated_reason)
         except UnsafeURL as exc:
             raise WorkflowError("自定义模型地址未通过公网安全校验，请检查地址与 DNS 配置。") from exc
         except httpx.HTTPError as exc:
@@ -583,7 +623,8 @@ class OpenAICompatibleAnalyzer:
             if texts:
                 return "\n".join(texts)
             raise KeyError("content")
-        return str(data["choices"][0]["message"]["content"])
+        content = data["choices"][0]["message"]["content"]
+        return "" if content is None else str(content)
 
     def _protocol(self) -> str:
         return normalize_protocol(self._protocol_override or getattr(self.settings, "llm_protocol", None))

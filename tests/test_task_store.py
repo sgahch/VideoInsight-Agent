@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from app.schemas import AnalysisMode, AnalysisResult, AnalyzeRequest, MediaInfo, TaskStatus
@@ -108,3 +110,58 @@ def test_delete(tmp_path: Path) -> None:
     assert store.delete(task.task_id) is True
     assert store.delete(task.task_id) is False
     assert store.get(task.task_id) is None
+
+
+def test_delete_expired_tasks_keeps_terminal_task_at_cutoff(tmp_path: Path) -> None:
+    db = tmp_path / "tasks.db"
+    store = SQLiteTaskStore(db)
+    task = store.create(_request())
+    store.set_failed(task.task_id, "failed")
+    cutoff = datetime(2025, 1, 2, 12)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE tasks SET created_at = ?, updated_at = ? WHERE task_id = ?",
+            ("2025-01-01T12:00:00", cutoff.isoformat(), task.task_id),
+        )
+
+    assert store.delete_terminal_before(cutoff) == []
+    assert store.get(task.task_id) is not None
+
+
+def test_mark_used_does_not_extend_task_retention(tmp_path: Path) -> None:
+    db = tmp_path / "tasks.db"
+    store = SQLiteTaskStore(db)
+    task = store.create(_request(client_id="owner"))
+    store.set_failed(task.task_id, "failed")
+    completed_at = datetime(2025, 1, 1, 12)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE tasks SET updated_at = ? WHERE task_id = ?",
+            (completed_at.isoformat(), task.task_id),
+        )
+
+    assert store.mark_used(task.task_id, "owner") is not None
+    assert store.get(task.task_id).updated_at == completed_at
+    assert store.delete_terminal_before(datetime(2025, 1, 2, 12)) == [task.task_id]
+
+
+def test_delete_expired_tasks_returns_only_deleted_ids(tmp_path: Path) -> None:
+    db = tmp_path / "tasks.db"
+    store = SQLiteTaskStore(db)
+    kept = store.create(_request())
+    deleted = store.create(_request())
+    store.set_failed(kept.task_id, "protected")
+    store.set_failed(deleted.task_id, "failed")
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE tasks SET created_at = ?, updated_at = ?",
+            ("2025-01-01T12:00:00", "2025-01-01T12:00:00"),
+        )
+        conn.execute(
+            "CREATE TRIGGER keep_protected_task BEFORE DELETE ON tasks "
+            "WHEN OLD.error = 'protected' BEGIN SELECT RAISE(IGNORE); END"
+        )
+
+    assert store.delete_terminal_before(datetime(2025, 1, 2, 12)) == [deleted.task_id]
+    assert store.get(kept.task_id) is not None
+    assert store.get(deleted.task_id) is None

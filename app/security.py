@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import logging
 import secrets
+from urllib.parse import unquote
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from app.account_auth import _owner, login_required, session_account
+from app.account_auth import _owner, account_identity, login_required, session_account
 from app.config import settings
 
 
@@ -34,6 +35,8 @@ LOGGER = logging.getLogger(__name__)
 AUTH_COOKIE_NAME = "videoinsight_token"
 # 浏览器端令牌有效期（秒）。比客户端身份 cookie 短得多：令牌是真正的凭据。
 AUTH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60
+# 浏览器在数据请求上携带的账号身份标识，用于探测「账号已切换」的过期配置。
+ACCOUNT_ID_HEADER = "X-VideoInsight-Account-Id"
 
 # 必须匿名可达的路径：
 # - "/" 与 /static：页面本身和它的 JS/CSS 得先加载出来，才能让用户输入令牌
@@ -94,6 +97,14 @@ async def auth_middleware(request: Request, call_next) -> Response:
     admin_only = path.startswith("/cookies/browser/")
     if account and not account.is_admin and admin_only:
         return JSONResponse(status_code=403, content={"detail": "普通账号请使用页内扫码或导入自己的 Cookies。"})
+    # 拒绝携带过期账号身份的请求：同一浏览器切换账号后，旧账号的模型密钥等
+    # 本地配置必须失效，不能让新账号继续沿用。处理在请求体解析之前完成。
+    header_account = request.headers.get(ACCOUNT_ID_HEADER)
+    if account_enabled and header_account and unquote(header_account) != account_identity(account):
+        return JSONResponse(
+            status_code=409,
+            content={"code": "account_changed", "detail": "检测到账号已切换，请刷新页面后重新配置。"},
+        )
     token = _owner.set(account.owner if account else None)
     try:
         return await call_next(request)

@@ -829,6 +829,40 @@ proxy containers are healthy; the latter two were not replaced. HTTP still
 redirects to HTTPS with status 308, certificate verification passed, and the
 existing TLS renewal cron remains active.
 
+## 2026-11-17: Per-Video Chat Memory
+
+`videoinsight:4d6db32` replaces `videoinsight:49330ba`. This is a source-content
+identifier, not a Git commit. The candidate inherits the verified production
+image and replaces only application/frontend sources; dependencies, helper
+1.0.1, environment, resource limits, mounts, TLS, and auxiliary services are
+unchanged.
+
+Chat history is stored as structured messages in browser `localStorage`,
+scoped by browser client and video task. Refreshing or reopening a video
+restores the conversation. Each follow-up includes that video's completed
+prior question/answer pairs. The cache retains up to 20 videos and 20 rounds
+per video; model context is additionally bounded to 60,000 historical
+characters. Interrupted answers remain visible but are excluded from future
+model context. Browser storage is not a server-side conversation database and
+does not synchronize across devices.
+
+Local regression: 771 Python tests passed, seven optional integrations skipped,
+with the existing dependency deprecation warning. Three Node cache tests passed.
+An isolated Linux candidate verified both chat routes, history prompt
+construction, role validation, and task isolation without paid model calls.
+Production smoke verified administrator login, the new frontend asset hash,
+streaming and non-streaming chat requests with history, and invalid-role
+rejection. Its synthetic task was removed. New submissions were temporarily
+gated and existing tasks, QR contexts, and helper sessions drained before
+switching. The original Nginx configurations were restored.
+
+Rollback container:
+`videoinsight-before-local-helper-4d6db32-chatmemory` (stopped, restart disabled).
+Private backup:
+`/opt/videoinsight/backups/20261117-local-helper-4d6db32-chatmemory`.
+The backup includes the original database, configuration, and container metadata.
+No user credentials or browser history are included in the release source.
+
 Rollback resources are protected under
 `/opt/videoinsight/backups/20261116-local-helper-49330ba-security`.
 The previous application container is stopped with restart disabled as
@@ -838,3 +872,62 @@ trusted proxy scheme. The older `0319728`-to-`b95e885` rollback caveat above
 still applies to that separate historical transition.
 Sources, tests, screenshots, helper/build inputs, and verification scripts are
 archived with hashes under `/opt/videoinsight/releases/49330ba`.
+
+## 2026-11-27: Resumable Audio And Video Uploads
+
+`videoinsight:c4e9a2b` replaces `videoinsight:4d6db32`. The release identifier
+hashes source contents, tests, the release Dockerfile, and the base image ID;
+it is not a Git commit. A comparison against the running baseline confirmed
+that only the eight application/frontend files for resumable uploads changed.
+Dependencies, helper 1.0.1, environment values, resource limits, persistent
+mounts, TLS, the QR browser, and the Groq proxy were preserved.
+
+The web uploader uses 4 MiB chunks, at most three concurrent requests,
+individual retries, and persisted upload sessions. Pause and resume are
+available in the upload card. After refresh, the user selects the original
+file again; the complete file fingerprint is checked before accepted chunks
+are skipped. Sessions default to a 24-hour retention window, with four
+pending uploads per owner and a declared-size quota of twice the individual
+file limit. Initialization, duplicate chunks, and completion requests are
+idempotent. Completed uploads enter the existing analysis queue once.
+This resumes file transfer; interrupted ASR/LLM work still follows the
+existing task recovery rules.
+
+Session databases and chunks live under `data/tmp/_uploads/<upload_id>/`.
+Final assembly happens in the media destination directory before atomic
+publication, which supports the existing separate `/app/data` and `/app/media`
+Docker mounts. Expired initialization remnants cannot block new uploads,
+and database lock contention does not trigger deletion of an active session.
+
+Windows regression passed 793 Python tests with seven optional skips;
+all 17 Node tests and JavaScript syntax checks passed. The headless Linux
+verification passed 789 tests with eight optional skips. The Tk desktop
+window module was excluded from the Linux run because Tk is absent from
+the server base image; it passed in the Windows run. The Linux test image
+added test-support sources without changing the production dependencies.
+One existing dependency deprecation warning remains. All 17 deployment
+cutover tests and the upload maintenance-gate check passed.
+
+The isolated Linux service and the production service both verified
+authenticated initialization, ownership checks, out-of-order chunks,
+resume state, duplicate completion, integrity, and cancellation. Public HTTPS
+browser verification paused an 8 MiB plus 17-byte synthetic upload with
+chunks 0 and 2 accepted. After refresh, only chunk 1 was sent; the mock
+analysis succeeded. The 390px layout had no horizontal overflow. Synthetic
+tasks and upload metadata were removed. No paid model inference or real
+platform login was used for these checks.
+
+The TLS maintenance gate temporarily blocked new submissions, including
+upload endpoints, while existing tasks and login handoffs drained. The
+database and root-only configuration were backed up before replacement.
+Both original Nginx files were restored, HTTP still redirects to HTTPS,
+and public certificate verification and frontend asset hashes passed.
+Existing account and task rows were preserved.
+
+Rollback container:
+`videoinsight-before-local-helper-c4e9a2b-uploads` (stopped, restart disabled).
+Private backup:
+`/opt/videoinsight/backups/20261127-local-helper-c4e9a2b-uploads`.
+Verified source, manifest, Linux results, and deployment scripts:
+`/opt/videoinsight/releases/c4e9a2b`.
+The release-specific build file is `Dockerfile.resumable-upload`.

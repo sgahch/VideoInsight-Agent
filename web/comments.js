@@ -58,12 +58,11 @@
     }
     return node;
   }
-  let clientId = localStorage.getItem("videoinsight_client_id");
-  if (!clientId) {clientId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2,12)}`;localStorage.setItem("videoinsight_client_id",clientId);}
-  document.cookie = `videoinsight_client_id=${encodeURIComponent(clientId)}; Path=/; SameSite=Lax; Max-Age=31536000`;
+  const clientId = getClientId();
   async function api(path, options = {}) {
     const headers = {"X-Client-Id":clientId,...options.headers};
-    const token = localStorage.getItem("videoinsight_auth_token");
+    let token = "";
+    try { token = localStorage.getItem("videoinsight_auth_token") || ""; } catch (error) { /* 存储不可用 */ }
     if (token) headers["X-Auth-Token"] = token;
     if (options.body) headers["Content-Type"] = "application/json";
     const response = await fetch(`/comment-api${path}`,{...options,headers});

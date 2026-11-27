@@ -2,7 +2,7 @@
  * VideoInsight Agent 前端交互逻辑。
  *
  * 所有数据均来自后端真实接口，界面中不保留任何假数据：
- *   POST /analyze-file   上传分析
+ *   /uploads/*          分片上传、续传与提交分析
  *   POST /analyze        链接分析
  *   GET  /tasks/{id}     任务轮询
  *   GET  /tasks          历史任务
@@ -83,6 +83,12 @@
     uploadMode: $("#uploadMode"),
     uploadReal: $("#uploadReal"),
     uploadRealRow: $("#uploadRealRow"),
+    uploadProgress: $("#uploadProgress"),
+    uploadProgressBar: $("#uploadProgressBar"),
+    uploadProgressText: $("#uploadProgressText"),
+    uploadPause: $("#uploadPause"),
+    uploadCancel: $("#uploadCancel"),
+    uploadResumeHint: $("#uploadResumeHint"),
 
     // 链接分析
     linkForm: $("#linkForm"),
@@ -230,6 +236,7 @@
     cookieAuthorization: null,
     clearingCookies: false,
     accountIsAdmin: false,
+    accountId: null, // 当前账号身份（account:<id> / admin:<name>），未登录为 null
     parsedLink: null, // 最新的 /parse-link 解析结果（含干净 url 与建议标签）
     transcriptText: "",
     summaryText: "", // AI 总结原始 Markdown，供「复制」按钮使用
@@ -242,29 +249,15 @@
    * 4. 通用工具
    * ==================================================================== */
 
-  const CLIENT_ID_KEY = "videoinsight_client_id";
   const ACTIVE_TASK_KEY = "videoinsight_active_task";
+  const CHAT_CACHE_KEY = "videoinsight_chats_v1";
   let accountLoginEnabled = false;
   let serverModelConfig = null;
   let queueView = null;
+  let uploadClient = null;
+  let identityResolved = false;
+  let legacyConfigCleared = false;
   const AUTH_TOKEN_KEY = "videoinsight_auth_token";
-
-  /**
-   * 获取本浏览器的持久化客户端身份标识。
-   * 用于任务归属隔离：历史任务/对话/媒体都只允许访问本客户端创建的任务。
-   */
-  function getClientId() {
-    try {
-      let value = localStorage.getItem(CLIENT_ID_KEY);
-      if (!value) {
-        value = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-        localStorage.setItem(CLIENT_ID_KEY, value);
-      }
-      return value;
-    } catch (error) {
-      return `ephemeral-${Math.random().toString(36).slice(2, 12)}`;
-    }
-  }
 
   /** 读取本地保存的访问令牌；服务端未启用鉴权时它一直是空串。 */
   function getAuthToken() {
@@ -272,6 +265,16 @@
       return localStorage.getItem(AUTH_TOKEN_KEY) || "";
     } catch (error) {
       return "";
+    }
+  }
+
+  function handleAccountError(response, data) {
+    if (response.status === 409 && data?.code === "account_changed") {
+      clearStaleAccountState();
+      window.location.reload();
+    } else if (response.status === 401 && accountLoginEnabled) {
+      clearStaleAccountState();
+      window.location.replace("/login");
     }
   }
 
@@ -305,8 +308,15 @@
   async function fetchJson(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    const externalSignal = options.signal;
+    const abort = () => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    else externalSignal?.addEventListener("abort", abort, { once: true });
     const headers = new Headers(options.headers || {});
     headers.set("X-Client-Id", getClientId());
+    if (state.accountId && url !== "/auth/me") {
+      headers.set("X-VideoInsight-Account-Id", encodeURIComponent(state.accountId));
+    }
     const token = getAuthToken();
     if (token) {
       headers.set("Authorization", `Bearer ${token}`);
@@ -323,19 +333,20 @@
         }
       }
       if (!response.ok) {
-        if (response.status === 401 && accountLoginEnabled) window.location.replace("/login");
+        handleAccountError(response, data);
         const error = new Error(extractError(data, response));
         error.status = response.status;
         throw error;
       }
       return data;
     } catch (error) {
-      if (error && error.name === "AbortError") {
+      if (error && error.name === "AbortError" && !externalSignal?.aborted) {
         throw new Error("请求超时，请确认服务仍在运行后重试。");
       }
       throw error;
     } finally {
       window.clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", abort);
     }
   }
 
@@ -349,9 +360,72 @@
     } catch (error) { /* Storage may be disabled. */ }
   }
 
+  function chatStorageKey() {
+    return `${CHAT_CACHE_KEY}:${getClientId()}`;
+  }
+
+  function loadChatMessages(taskId) {
+    if (state.chatSessions.has(taskId)) return state.chatSessions.get(taskId);
+    let messages = [];
+    try {
+      const cache = JSON.parse(localStorage.getItem(chatStorageKey()) || "{}");
+      const saved = cache[taskId];
+      if (Array.isArray(saved)) {
+        messages = saved.filter((m) => m && ["user", "assistant"].includes(m.role)
+          && typeof m.content === "string" && m.content.length <= 20000)
+          .slice(-40).map((m) => ({
+            role: m.role, content: m.content, complete: m.complete === true,
+          }));
+      }
+    } catch (error) { /* Invalid or unavailable storage starts an empty chat. */ }
+    state.chatSessions.set(taskId, messages);
+    return messages;
+  }
+
+  function saveChatMessages(taskId, messages) {
+    const recent = messages.slice(-40);
+    state.chatSessions.set(taskId, recent);
+    try {
+      let cache;
+      try { cache = JSON.parse(localStorage.getItem(chatStorageKey()) || "{}"); } catch { cache = {}; }
+      if (!cache || typeof cache !== "object" || Array.isArray(cache)) cache = {};
+      delete cache[taskId];
+      cache[taskId] = recent;
+      const entries = Object.entries(cache).slice(-20);
+      localStorage.setItem(chatStorageKey(), JSON.stringify(Object.fromEntries(entries)));
+    } catch (error) { /* Keep the in-memory chat when storage is full or disabled. */ }
+  }
+
+  function restoreChatMessages(taskId) {
+    els.chatMessages.innerHTML = WELCOME_HTML;
+    for (const message of loadChatMessages(taskId)) {
+      const interrupted = message.role === "assistant" && !message.complete;
+      appendBubble(message.role === "assistant" ? "agent" : "user",
+        interrupted ? `${message.content}\n\n生成已中断。` : message.content,
+        { error: interrupted });
+    }
+  }
+
+  function chatHistory(messages) {
+    const history = [];
+    let size = 0;
+    for (let i = messages.length - 2; i >= 0; i -= 2) {
+      const pair = messages.slice(i, i + 2);
+      if (pair[0].role !== "user" || pair[1].role !== "assistant" || !pair[1].complete) continue;
+      const length = pair[0].content.length + pair[1].content.length;
+      if (size + length > 60000) break;
+      size += length;
+      history.unshift(...pair.map(({ role, content }) => ({ role, content })));
+    }
+    return history;
+  }
+
   async function fetchEvents(url, options, onEvent, controller, idleMs = 45000) {
     const headers = new Headers(options.headers || {});
     headers.set("X-Client-Id", getClientId());
+    if (state.accountId && url !== "/auth/me") {
+      headers.set("X-VideoInsight-Account-Id", encodeURIComponent(state.accountId));
+    }
     headers.set("Accept", "text/event-stream");
     const token = getAuthToken();
     if (token) headers.set("Authorization", `Bearer ${token}`);
@@ -368,7 +442,7 @@
         const data = await response.json().catch(() => ({}));
         const error = new Error(extractError(data, response));
         error.status = response.status;
-        if (error.status === 401 && accountLoginEnabled) window.location.replace("/login");
+        handleAccountError(response, data);
         throw error;
       }
       if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
@@ -532,6 +606,7 @@
   }
 
   function analysisModelPayload(mode, useMock) {
+    if (!identityResolved) return null;
     if (mode === "transcript" || useMock) {
       return {};
     }
@@ -558,7 +633,7 @@
     const linkTranscript = els.linkMode.value === "transcript";
     els.uploadRealRow.hidden = uploadTranscript;
     els.linkRealRow.hidden = linkTranscript;
-    els.uploadSubmit.textContent = "上传并入队";
+    if (!uploadClient?.running) els.uploadSubmit.textContent = uploadClient?.session ? "继续上传并入队" : "上传并入队";
     els.linkSubmit.textContent = "加入处理队列";
   }
 
@@ -851,9 +926,8 @@
         node.classList.remove("is-thinking");
         node.textContent = "已停止生成。";
       });
-      if (state.renderedTaskId) state.chatSessions.set(state.renderedTaskId, els.chatMessages.innerHTML);
       if (state.chatSessions.size > 20) state.chatSessions.delete(state.chatSessions.keys().next().value);
-      els.chatMessages.innerHTML = state.chatSessions.get(task.task_id) || WELCOME_HTML;
+      restoreChatMessages(task.task_id);
       els.chatInput.value = "";
       state.transcriptText = "";
       state.summaryText = "";
@@ -1268,9 +1342,59 @@
     tick();
   }
 
-  /** 上传文件分析。 */
+  function setUploadBusy(busy) {
+    els.uploadSubmit.disabled = busy || !identityResolved;
+    els.mediaFile.disabled = busy;
+    els.uploadMode.disabled = busy;
+    els.uploadReal.disabled = busy;
+  }
+
+  function renderUploadProgress(progress) {
+    const percent = progress.stage === "hashing" ? progress.hashPercent || 0
+      : Math.min(100, (progress.uploadedBytes || 0) / (progress.totalBytes || 1) * 100);
+    els.uploadProgress.hidden = progress.stage === "cancelled";
+    els.uploadProgressBar.value = percent;
+    const amount = `${((progress.uploadedBytes || 0) / 1048576).toFixed(1)} / ${((progress.totalBytes || 0) / 1048576).toFixed(1)} MB`;
+    const messages = {
+      hashing: `正在校验文件 ${Math.floor(percent)}%`,
+      uploading: `已上传 ${Math.floor(percent)}% · ${amount}${progress.retrying ? " · 连接中断，正在重试" : ""}`,
+      completing: "上传完成，正在校验并加入分析队列…",
+      paused: `已暂停 · ${amount}，点击继续即可续传。`,
+      done: "上传完成，已加入分析队列。",
+      cancelled: "上传已取消。",
+    };
+    els.uploadProgressText.textContent = messages[progress.stage] || "正在准备上传…";
+    els.uploadPause.hidden = !["hashing", "uploading"].includes(progress.stage);
+    els.uploadCancel.hidden = ["done", "cancelled"].includes(progress.stage);
+    els.uploadCancel.disabled = progress.stage === "completing";
+    if (progress.stage === "hashing") els.uploadSubmit.textContent = "正在校验文件…";
+    if (progress.stage === "uploading") els.uploadSubmit.textContent = `上传中 ${Math.floor(percent)}%`;
+    if (progress.stage === "completing") els.uploadSubmit.textContent = "正在提交分析…";
+  }
+
+  function getUploadClient() {
+    if (!uploadClient) uploadClient = new window.ResumableUpload.ResumableUploader({
+      request: fetchJson,
+      storageKey: `videoinsight_uploads_v1:${state.uploadOwner || getClientId()}`,
+      onProgress: renderUploadProgress,
+    });
+    return uploadClient;
+  }
+
+  function renderUploadResumeHint() {
+    if (!identityResolved) return;
+    const pending = getUploadClient().pending();
+    els.uploadResumeHint.hidden = pending.length === 0;
+    if (pending.length) {
+      els.uploadResumeHint.textContent = `有未完成的上传：${pending[0].filename}。重新选择原文件并点击上传即可续传；也可以取消此上传。`;
+      els.uploadCancel.hidden = false;
+    }
+  }
+
+  /** 分片上传文件，完成后接入原有分析队列。 */
   async function submitUpload(event) {
     event.preventDefault();
+    if (!identityResolved) return;
     const file = els.mediaFile.files && els.mediaFile.files[0];
     if (!file) {
       setTaskStatus("failed", "请先选择一个音频或视频文件。");
@@ -1285,28 +1409,29 @@
       return;
     }
 
-    const form = new FormData();
-    form.append("file", file);
-    form.append("mode", mode);
-    form.append("use_mock", String(useMock));
-    Object.entries(llmPayload).forEach(([key, value]) => form.append(key, value));
-
-    els.uploadSubmit.disabled = true;
-    els.uploadSubmit.textContent = "上传中...";
+    setUploadBusy(true);
+    els.uploadResumeHint.hidden = true;
     try {
-      const data = await fetchJson("/analyze-file", { method: "POST", body: form }, 60000);
+      const data = await getUploadClient().upload(file, { mode, use_mock: useMock, ...llmPayload });
+      if (!data) return;
       els.taskSource.textContent = file.name;
       await queueView.onSubmitted(data.task_id);
     } catch (error) {
-      setTaskStatus("failed", `提交失败：${error.message}`);
-      queueView?.notify(`提交失败：${error.message}`, true);
+      els.uploadProgress.hidden = false;
+      els.uploadProgressText.textContent = `上传暂未完成：${error.message} 已确认的分片会保留，可点击继续或取消。`;
+      els.uploadPause.hidden = true;
+      els.uploadCancel.hidden = false;
+      els.uploadCancel.disabled = false;
+      queueView?.notify(`上传暂未完成：${error.message}`, true);
     } finally {
-      els.uploadSubmit.disabled = false;
+      setUploadBusy(false);
       syncAnalysisModeUi();
+      renderUploadResumeHint();
     }
   }
 
   async function startLinkAnalysis({ url, mode, useMock, label }, automaticRetry = false) {
+    if (!identityResolved) return;
     if (!url) {
       setTaskStatus("failed", "请输入视频链接。");
       queueView?.notify("请输入视频链接。", true);
@@ -1347,7 +1472,7 @@
       setTaskStatus("failed", `提交失败：${error.message}`);
       queueView?.notify(`提交失败：${error.message}`, true);
     } finally {
-      els.linkSubmit.disabled = false;
+      els.linkSubmit.disabled = !identityResolved;
       syncAnalysisModeUi();
     }
   }
@@ -1564,6 +1689,12 @@
     }
     try {
       await fetchJson(`/tasks/${taskId}`, { method: "DELETE" }, 15000);
+      state.chatSessions.delete(taskId);
+      try {
+        const cache = JSON.parse(localStorage.getItem(chatStorageKey()) || "{}");
+        delete cache[taskId];
+        localStorage.setItem(chatStorageKey(), JSON.stringify(cache));
+      } catch (error) { /* Storage may be disabled. */ }
       if (state.currentTaskId === taskId) {
         stopPolling();
         state.currentTaskId = null;
@@ -2020,10 +2151,10 @@
 
   /** 切换发送按钮与快捷 Prompt 的可用状态。 */
   function setChatBusy(busy) {
-    els.sendChatBtn.disabled = busy;
+    els.sendChatBtn.disabled = busy || !identityResolved;
     els.sendChatBtn.textContent = busy ? "思考中..." : "发送";
     els.promptChips.querySelectorAll(".chip-btn").forEach((chip) => {
-      chip.disabled = busy;
+      chip.disabled = busy || !identityResolved;
     });
   }
 
@@ -2033,7 +2164,7 @@
    * @param {string} rawQuestion 用户问题
    */
   async function sendChat(rawQuestion) {
-    if (state.chatController) return;
+    if (!identityResolved || state.chatController) return;
     const question = String(rawQuestion || "").trim();
     if (!question) {
       return;
@@ -2056,9 +2187,9 @@
     if (!task) {
       // 未选中任务时，自动拾取最近一个成功任务作为对话上下文
       task = await pickRecentSucceededTask();
+      if (!identityResolved) return;
       if (task) {
-        state.currentTask = task;
-        state.currentTaskId = task.task_id;
+        applyTask(task);
         updateAgentContext();
         highlightHistory(task.task_id);
       }
@@ -2076,6 +2207,11 @@
       return;
     }
 
+    const messages = loadChatMessages(task.task_id).slice();
+    const history = chatHistory(messages);
+    const reply = { role: "assistant", content: "", complete: false };
+    messages.push({ role: "user", content: question.slice(0, 20000), complete: true }, reply);
+    saveChatMessages(task.task_id, messages);
     appendBubble("user", question);
     els.chatInput.value = "";
     const thinking = appendBubble("agent", "思考中...", { thinking: true });
@@ -2083,12 +2219,15 @@
     const controller = new AbortController();
     state.chatController = controller;
     let answer = "";
+    let failureMessage = "";
     let renderTimer = null;
     const render = () => {
       renderTimer = null;
       if (!thinking.isConnected) return;
       thinking.classList.remove("is-thinking");
       thinking.innerHTML = renderMarkdown(answer);
+      reply.content = answer.slice(0, 20000);
+      saveChatMessages(task.task_id, messages);
       scrollChatToBottom();
     };
 
@@ -2101,7 +2240,7 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(
             Object.assign(
-              { question: question },
+              { question: question, history },
               llmConfig ? {
                 llm_provider: llmConfig.provider,
                 llm_base_url: llmConfig.baseUrl,
@@ -2117,6 +2256,7 @@
             answer += data.text;
             if (renderTimer === null) renderTimer = window.setTimeout(render, 80);
           }
+          if (event === "done") reply.complete = Boolean(answer.trim());
           return event === "done";
         },
         controller,
@@ -2126,11 +2266,14 @@
       if (!thinking.isConnected) return;
       thinking.classList.remove("is-thinking");
       const message = error.name === "AbortError" ? "连接超时，请稍后重试。" : error.message;
+      failureMessage = `提问失败：${message}`;
       thinking.innerHTML = renderMarkdown(answer ? `${answer}\n\n生成中断：${message}` : `提问失败：${message}`);
       thinking.parentElement.classList.add("is-error");
       scrollChatToBottom();
     } finally {
       window.clearTimeout(renderTimer);
+      reply.content = (answer || failureMessage).slice(0, 20000);
+      saveChatMessages(task.task_id, messages);
       if (!thinking.parentElement.classList.contains("is-error") && answer) render();
       if (state.chatController === controller) {
         state.chatController = null;
@@ -2177,10 +2320,19 @@
     custom: { baseUrl: "", model: "", protocol: "chat_completions" },
   };
 
-  /** 读取本地保存的模型配置；未配置返回 null。 */
+  /** 模型配置存储键：登录账号按 account_id 隔离，未登录沿用原有共用键。 */
+  function modelConfigKey() {
+    return state.accountId ? `${MODEL_CONFIG_KEY}:${state.accountId}` : MODEL_CONFIG_KEY;
+  }
+
+  /** 读取当前账号的模型配置；未配置返回 null。 */
   function loadModelConfig() {
+    if (!identityResolved) {
+      // 身份未就绪前不读任何模型配置：登录模式下账号可能已切换。
+      return null;
+    }
     try {
-      const raw = localStorage.getItem(MODEL_CONFIG_KEY);
+      const raw = localStorage.getItem(modelConfigKey());
       if (!raw) {
         return null;
       }
@@ -2189,6 +2341,59 @@
     } catch (error) {
       return null;
     }
+  }
+
+  /** 账号身份就绪后，按账号加载/清理模型配置并启用表单。 */
+  function applyAccountIdentity(account) {
+    state.accountId = account?.account_id ?? null;
+    state.accountIsAdmin = account ? account.is_admin === true : true;
+    state.uploadOwner = account?.username ?? null; // Keep existing resumable upload records accessible.
+
+    identityResolved = true;
+
+    let hadLegacy = false;
+    if (state.accountId) {
+      // 登录账号：旧的共用配置无法确认归属，直接清除并提示重新配置。
+      try {
+        hadLegacy = localStorage.getItem(MODEL_CONFIG_KEY) !== null;
+        if (hadLegacy) localStorage.removeItem(MODEL_CONFIG_KEY);
+      } catch (error) { /* 存储不可用 */ }
+    }
+    legacyConfigCleared = hadLegacy;
+
+    const config = loadModelConfig();
+    fillModelForm(config);
+    renderModelState();
+    updateAgentContext();
+    setIdentityControls(true);
+    if (hadLegacy && !config) {
+      setModelMessage("已切换到账号登录：旧版共用模型配置已清除，请为本账号重新配置 API Key。", "error");
+    }
+  }
+
+  function setIdentityControls(ready) {
+    const modelControls = [els.llmProvider, els.llmBaseUrl, els.llmProtocol, els.llmModel, els.llmApiKey,
+      els.saveModelConfig, els.testModelConfig, els.clearModelConfig];
+    for (const control of modelControls) control.disabled = !ready;
+    els.linkSubmit.disabled = !ready;
+    setUploadBusy(Boolean(uploadClient?.running));
+    setChatBusy(Boolean(state.chatController));
+  }
+
+  function clearStaleAccountState() {
+    identityResolved = false;
+    stopPolling();
+    state.chatController?.abort();
+    state.chatController = null;
+    uploadClient?.pause();
+    uploadClient = null;
+    state.pendingCookieRetry = null;
+    serverModelConfig = null;
+    fillModelForm(null);
+    renderModelState();
+    updateAgentContext();
+    setModelMessage("");
+    setIdentityControls(false);
   }
 
   /** 把表单内容填入 UI。 */
@@ -2255,6 +2460,7 @@
 
   /** 保存表单配置到 localStorage。 */
   function saveModelConfig() {
+    if (!identityResolved) return;
     const provider = els.llmProvider.value;
     const baseUrl = els.llmBaseUrl.value.trim();
     const protocol = els.llmProtocol.value;
@@ -2273,7 +2479,7 @@
     }
     try {
       localStorage.setItem(
-        MODEL_CONFIG_KEY,
+        modelConfigKey(),
         JSON.stringify({ provider, baseUrl, protocol, model, apiKey }),
       );
     } catch (error) {
@@ -2287,6 +2493,7 @@
 
   /** 用一条极短请求验证「Base URL + 模型 + Key + 协议」是否真的可用。 */
   async function testModelConnection() {
+    if (!identityResolved) return;
     const provider = els.llmProvider.value;
     const baseUrl = els.llmBaseUrl.value.trim();
     const protocol = els.llmProtocol.value;
@@ -2323,6 +2530,7 @@
         },
         60000,
       );
+      if (!identityResolved) return;
       if (data && data.ok) {
         setModelMessage(
           `连接成功：${data.protocol_label || data.protocol} · ${data.model || model} · ${data.latency_ms}ms` +
@@ -2333,19 +2541,21 @@
         setModelMessage(`连接失败：${(data && data.error) || "未知错误"}`, "error");
       }
     } catch (error) {
-      setModelMessage(`连接失败：${error.message}`, "error");
+      if (identityResolved) setModelMessage(`连接失败：${error.message}`, "error");
     } finally {
-      els.testModelConfig.disabled = false;
+      els.testModelConfig.disabled = !identityResolved;
       els.testModelConfig.textContent = originalText;
     }
   }
 
   /** 清除本地模型配置，恢复服务端默认。 */
   function clearModelConfig() {
+    if (!identityResolved) return;
     try {
-      localStorage.removeItem(MODEL_CONFIG_KEY);
+      localStorage.removeItem(modelConfigKey());
     } catch (error) {
-      // 忽略清除失败
+      setModelMessage("浏览器未能清除模型配置。", "error");
+      return;
     }
     fillModelForm(null);
     renderModelState();
@@ -2368,7 +2578,7 @@
     els.saveModelConfig.addEventListener("click", saveModelConfig);
     els.testModelConfig.addEventListener("click", testModelConnection);
     els.clearModelConfig.addEventListener("click", clearModelConfig);
-    fillModelForm(loadModelConfig());
+    // 模型配置的加载延后到 refreshServiceState 拿到账号身份之后（applyAccountIdentity）。
     renderModelState();
   }
 
@@ -2518,6 +2728,7 @@
   async function refreshServiceState() {
     try {
       const health = await fetchJson("/health", {}, 8000);
+      if (typeof health?.login_required !== "boolean") throw new Error("Invalid health response");
       const cookieState = health.cookies_file
         ? "cookies 文件已配置"
         : health.cookies_from_browser
@@ -2526,15 +2737,23 @@
       els.statusDot.classList.remove("is-offline");
       els.serviceState.textContent = `服务正常 · 默认 ${health.mock_mode ? "Mock" : "真实"} 模式 · ${cookieState}`;
 
-      accountLoginEnabled = Boolean(health.login_required);
-      state.accountIsAdmin = !accountLoginEnabled;
+      accountLoginEnabled = health.login_required;
       document.getElementById("accountLogout").hidden = !accountLoginEnabled;
       document.getElementById("accountSecurity").hidden = !accountLoginEnabled;
       if (accountLoginEnabled) {
         const account = await fetchJson("/auth/me");
-        if (!account.authenticated) window.location.replace("/login");
-        state.accountIsAdmin = account.authenticated === true && account.is_admin === true;
+        if (account?.authenticated !== true) {
+          window.location.replace("/login");
+          return;
+        }
+        if (typeof account.account_id !== "string" || !account.account_id) {
+          els.serviceState.textContent = "无法确认当前账号，请刷新页面重试。";
+          return;
+        }
+        applyAccountIdentity(account);
         document.getElementById("accountLogout").title = account.username || "退出登录";
+      } else {
+        applyAccountIdentity(null);
       }
       if (health.auth_required && !accountLoginEnabled) {
         els.authSection.hidden = false;
@@ -2634,6 +2853,20 @@
 
   function bindEvents() {
     els.uploadForm.addEventListener("submit", submitUpload);
+    els.uploadPause.addEventListener("click", () => uploadClient?.pause());
+    els.uploadCancel.addEventListener("click", async () => {
+      if (!identityResolved) return;
+      els.uploadCancel.disabled = true;
+      try {
+        await getUploadClient().cancel();
+        els.uploadResumeHint.hidden = true;
+        syncAnalysisModeUi();
+        renderUploadResumeHint();
+      } catch (error) {
+        els.uploadProgress.hidden = false;
+        els.uploadProgressText.textContent = `取消失败：${error.message}`;
+      } finally { els.uploadCancel.disabled = false; }
+    });
     els.linkForm.addEventListener("submit", submitLink);
     attachLinkParser();
     els.uploadMode.addEventListener("change", syncAnalysisModeUi);
@@ -2724,12 +2957,28 @@
     bindModelSettings();
     bindAuthSettings();
     document.getElementById("accountLogout").addEventListener("click", async () => {
+      if (!identityResolved || !state.accountId) return;
+      identityResolved = false;
+      setIdentityControls(false);
       try {
         await fetchJson("/auth/logout", { method: "POST" });
-        localStorage.removeItem(AUTH_TOKEN_KEY);
-        window.location.replace("/login");
       } catch (error) {
-        window.alert(`退出失败：${error.message}`);
+        if (error.status !== 409 && error.status !== 401) {
+          identityResolved = true;
+          setIdentityControls(true);
+          window.alert(`退出失败：${error.message}`);
+        }
+        return;
+      }
+      try { localStorage.removeItem(modelConfigKey()); } catch (error) { /* 浏览器禁止写入时仍清空当前页面 */ }
+      try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch (error) { /* 登录 Cookie 已在服务端撤销 */ }
+      clearStaleAccountState();
+      window.location.replace("/login");
+    });
+    window.addEventListener("pageshow", (event) => {
+      if (event.persisted && accountLoginEnabled) {
+        clearStaleAccountState();
+        window.location.reload();
       }
     });
     bindThemeToggle();
@@ -2737,6 +2986,7 @@
 
   /** 页面初始化。 */
   async function boot() {
+    setIdentityControls(false);
     bindEvents();
     queueView = window.VideoQueue.create({
       fetchJson,
@@ -2758,15 +3008,19 @@
     queueView.prepare();
     updateAgentContext();
     await refreshServiceState();
+    if (!identityResolved) return;
+    renderUploadResumeHint();
     queueView.start();
     try {
       const config = await fetchJson("/config");
-      if (config.llm.configured) {
+      if (identityResolved && config.llm.configured) {
         serverModelConfig = { provider: config.llm.provider, baseUrl: config.llm.base_url, model: config.llm.model, protocol: config.llm.protocol };
         els.llmApiKey.placeholder = "留空使用服务器默认模型";
         fillModelForm(loadModelConfig());
         renderModelState();
-        setModelMessage("服务器默认模型已就绪，可直接分析和追问。填写自己的 Key 可覆盖默认模型。", "ok");
+        if (!legacyConfigCleared) {
+          setModelMessage("服务器默认模型已就绪，可直接分析和追问。填写自己的 Key 可覆盖默认模型。", "ok");
+        }
         updateAgentContext();
       }
     } catch (error) { /* Service state already reports connection errors. */ }

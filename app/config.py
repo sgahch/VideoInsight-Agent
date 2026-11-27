@@ -74,6 +74,9 @@ class Settings:
     # 单个上传文件的大小上限。必须有限制：上传端点无鉴权，没有上限时一个请求
     # 就能写满磁盘。默认 2048 MB，足够放下长视频。
     max_upload_mb: int = int(os.getenv("VIDEOINSIGHT_MAX_UPLOAD_MB", "2048"))
+    upload_chunk_bytes: int = int(os.getenv("VIDEOINSIGHT_UPLOAD_CHUNK_BYTES", "4194304"))
+    upload_retention_hours: int = int(os.getenv("VIDEOINSIGHT_UPLOAD_RETENTION_HOURS", "24"))
+    max_pending_uploads: int = int(os.getenv("VIDEOINSIGHT_MAX_PENDING_UPLOADS", "4"))
     # 隔离产物的回收周期；<=0 关闭周期性回收（启动时的一次性回收仍会执行）。
     cleanup_interval_hours: int = int(os.getenv("VIDEOINSIGHT_CLEANUP_INTERVAL_HOURS", "6"))
     # 同时执行的长任务上限。刻意有界：一个视频任务动辄十几分钟，不限并发会

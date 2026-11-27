@@ -62,6 +62,7 @@ def test_verified_registration_logs_in_and_persists_hashed_password(setup):
     me = client.get("/auth/me").json()
     assert me["username"] == "alice@example.com" and me["authenticated"] and not me["is_admin"]
     user = SQLiteAccountStore(config.db_path).by_email("alice@example.com")
+    assert me["account_id"] == f"account:{user['user_id']}"
     assert accounts.verify_password(PASSWORD, user["password_hash"])
     assert user["password_hash"] != PASSWORD
     with sqlite3.connect(config.db_path) as connection:
