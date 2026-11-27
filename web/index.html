@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>VideoInsight Agent - 沉浸式 AI 视频分析平台</title>
   <link rel="stylesheet" href="/static/styles.css?v=20261126-upload1" />
-  <link rel="stylesheet" href="/static/queue.css?v=20261106-used1" />
+  <link rel="stylesheet" href="/static/queue.css?v=20261127-retry-search1" />
 </head>
 
 <body>
@@ -148,7 +148,9 @@
             <button type="button" role="tab" data-queue-filter="succeeded" aria-selected="false">已完成</button>
             <button type="button" role="tab" data-queue-filter="failed" aria-selected="false">失败</button>
           </div>
-          <input id="queueSearch" class="form-input queue-search" type="search" aria-label="搜索任务" placeholder="搜索标题或链接" />
+          <form id="queueSearchForm" class="queue-search-form" role="search" autocomplete="off">
+            <input id="queueSearch" name="task-filter-query" class="form-input queue-search" type="search" aria-label="搜索任务" placeholder="搜索标题或链接" autocomplete="off" data-lpignore="true" data-1p-ignore />
+          </form>
         </div>
         <p id="queueNotice" class="queue-notice" role="status" aria-live="polite" hidden></p>
         <div id="queueTaskList" class="queue-task-list" role="tabpanel" aria-label="任务列表"><div class="queue-empty">正在加载任务…</div></div>
@@ -578,7 +580,7 @@
   </div>
 
   <script src="/static/comment-utils.js?v=20261105"></script>
-  <script src="/static/queue.js?v=20261106-used1"></script>
+  <script src="/static/queue.js?v=20261127-retry-search1"></script>
   <script src="/static/local-login.js?v=20261116-helper101"></script>
   <script src="/static/client-identity.js?v=20261127"></script>
   <script src="/static/resumable-upload.js?v=20261126-upload1"></script>

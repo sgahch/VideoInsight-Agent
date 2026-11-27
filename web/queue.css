@@ -44,7 +44,8 @@ body[data-view="detail"] #workspace { display: none; }
 .queue-filters { display: flex; overflow-x: auto; flex: 1; min-width: 0; gap: 16px; }
 .queue-filters button { padding: 8px 0; border-bottom: 2px solid transparent; flex: 0 0 auto; color: var(--text-muted); font-size: 12px; white-space: nowrap; transition: none; }
 .queue-filters button[aria-selected="true"] { color: var(--text); border-color: var(--accent); }
-.queue-search { width: 205px; flex: 0 1 205px; font-size: 12px; padding: 7px 10px; min-width: 120px; }
+.queue-search-form { display: flex; flex: 0 1 205px; margin: 0; min-width: 120px; }
+.queue-search { width: 100%; flex: 1; font-size: 12px; padding: 7px 10px; min-width: 120px; }
 .queue-task-list { min-width: 0; margin-top: 10px; }
 .queue-task-row { display: flex; align-items: center; border-bottom: 1px solid var(--border); gap: 8px; padding-right: 4px; }
 .queue-task-row:hover { background: var(--surface); }
@@ -89,7 +90,7 @@ body[data-view="detail"] #workspace { display: none; }
 body[data-view="detail"] .platform-showcase { display: none; }
 @media (max-width: 1199px) and (min-width: 960px), (max-width: 699px) {
   .queue-toolbar { flex-wrap: wrap; }
-  .queue-search { flex: 1 1 100%; width: 100%; }
+  .queue-search-form { flex: 1 1 100%; width: 100%; }
   .queue-pool-visual { flex-wrap: wrap; gap: 12px; }
   .queue-buffer { flex: 1 1 100%; }
   .queue-buffer progress { flex: 1; }

@@ -23,6 +23,7 @@
       let tasks = [];
       let filter = "all";
       let search = "";
+      let searchText = "";
       let page = 1;
       let selectedId = null;
       let timer = null;
@@ -211,6 +212,10 @@
       }
 
       function renderTasks() {
+        const searchInput = $("queueSearch");
+        // Password managers can fill the search field when retrying a task.
+        // Only focused editing changes the query; polling reconciles silent fills.
+        if (document.activeElement !== searchInput) searchInput.value = searchText;
         const focused = document.activeElement?.closest(".queue-task-row")?.dataset.taskId;
         const visible = tasks.filter((task) =>
           (filter === "all" || task.status === filter) &&
@@ -324,7 +329,17 @@
         buttons[next].click();
         buttons[next].focus();
       });
-      $("queueSearch").addEventListener("input", (event) => { search = event.target.value.trim().toLocaleLowerCase(); page = 1; renderTasks(); });
+      $("queueSearchForm").addEventListener("submit", (event) => event.preventDefault());
+      $("queueSearch").addEventListener("input", (event) => {
+        if (document.activeElement !== event.target) {
+          event.target.value = searchText;
+          return;
+        }
+        searchText = event.target.value;
+        search = searchText.trim().toLocaleLowerCase();
+        page = 1;
+        renderTasks();
+      });
       $("queuePrevious").addEventListener("click", () => { page -= 1; renderTasks(); });
       $("queueNext").addEventListener("click", () => { page += 1; renderTasks(); });
       window.addEventListener("popstate", route);
