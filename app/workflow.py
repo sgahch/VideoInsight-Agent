@@ -297,6 +297,8 @@ def analyze(
     *,
     on_update: Callable[[AnalysisResult], None] | None = None,
 ) -> AnalysisResult:
+    from app.asr_settings import effective_settings
+    runtime_settings = effective_settings(runtime_settings, request.client_id)
     if request.asr_provider:
         runtime_settings = replace(runtime_settings, asr_provider=request.asr_provider, asr_require_timestamps=request.asr_require_timestamps)
     runtime_settings.ensure_dirs()
@@ -406,6 +408,8 @@ def analyze_media_file(
     *,
     on_update: Callable[[AnalysisResult], None] | None = None,
 ) -> AnalysisResult:
+    from app.asr_settings import effective_settings
+    runtime_settings = effective_settings(runtime_settings, request.client_id)
     if request.asr_provider:
         runtime_settings = replace(runtime_settings, asr_provider=request.asr_provider, asr_require_timestamps=request.asr_require_timestamps)
     runtime_settings.ensure_dirs()

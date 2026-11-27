@@ -97,6 +97,7 @@ function page({ records = new Map(), account, storageFailure, handler = () => nu
     constructor(options) { super({ ...options, storage: context.localStorage }); }
   } };
   const identityScript = "client-identity.js";
+  vm.runInContext(source("asr-settings.js"), context);
   if (fs.existsSync("web/" + identityScript)) vm.runInContext(source(identityScript), context);
   let ready;
   if (comments) {
@@ -219,6 +220,20 @@ test("a failed or incomplete identity never unlocks legacy model settings", asyn
     assert.equal(browser.node("saveModelConfig").disabled, true);
     assert.deepEqual(browser.requests.map(({ path }) => path), ["/health", "/auth/me"]);
   }
+});
+
+test("late account configuration cannot restore ASR controls after account reset", async () => {
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const browser = page({ account: ACCOUNT_A, handler: path => path === "/config" ? pending : null });
+  await new Promise(setImmediate);
+  assert.ok(browser.requests.some(r => r.path === "/config"));
+  for (const listener of browser.listeners.pageshow) listener({ persisted: true });
+  release(json({ llm: { configured: false }, asr: { default: "siliconflow", providers: [{ id: "siliconflow", configured: true }], fields: { siliconflow: { credential_saved: true } } } }));
+  await browser.ready;
+  assert.equal(browser.node("asrSave").disabled, true);
+  assert.equal(browser.node("asrApiKey").value, "");
+  assert.equal(browser.node("asrSettingsStatus").textContent, "");
 });
 
 test("a cached page clears the previous account before the browser restores it", async () => {

@@ -5,7 +5,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>VideoInsight Agent - 沉浸式 AI 视频分析平台</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261126-upload1" />
+  <link rel="stylesheet" href="/static/styles.css?v=20261127-settings1" />
   <link rel="stylesheet" href="/static/queue.css?v=20261127-retry-search1" />
 </head>
 
@@ -170,6 +170,44 @@
           <label for="asrProvider">语音转写服务</label>
           <select id="asrProvider" class="form-input"><option value="">服务器默认服务</option></select>
           <p class="input-hint">音频仅发送给所选服务，失败不会自动换服务商。纯文本服务不提供时间戳与字幕时间轴；离线 Whisper 不向外部服务上传音频。</p>
+          <details id="asrSettings" class="asr-settings">
+            <summary>配置转写服务 / API Key</summary>
+            <form id="asrSettingsForm" autocomplete="off">
+              <p class="input-hint">配置仅供当前账号使用。保存后可切换服务；已排队任务和重试任务继续使用原服务。</p>
+              <div class="form-group">
+                <label for="asrSettingsProvider">要配置的服务</label>
+                <select id="asrSettingsProvider" class="form-input">
+                  <option value="siliconflow">硅基流动 SenseVoiceSmall（免费纯文本）</option>
+                  <option value="cloudflare">Cloudflare Whisper（时间戳）</option>
+                  <option value="groq">Groq Whisper（时间戳）</option>
+                  <option value="faster_whisper">离线 Whisper（时间戳）</option>
+                </select>
+              </div>
+              <p id="asrSettingsHelp" class="input-hint"></p>
+              <p id="asrSettingsSource" class="input-hint"></p>
+              <div id="asrAccountGroup" class="form-group" hidden>
+                <label for="asrAccountId">Cloudflare Account ID</label>
+                <input id="asrAccountId" class="form-input" type="text" maxlength="32" autocomplete="off" spellcheck="false" placeholder="32 位账号 ID" />
+              </div>
+              <div id="asrSecretGroup" class="form-group">
+                <label id="asrSecretLabel" for="asrApiKey">API Key</label>
+                <input id="asrApiKey" class="form-input" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" placeholder="填写服务商密钥" />
+                <p class="input-hint">密钥不会回显。留空保留已保存的密钥；更换密钥请重新填写。</p>
+              </div>
+              <label id="asrFreeGroup" class="asr-check" hidden><input id="asrFreeConfirmed" type="checkbox" /> 我已确认此 Groq 账号使用免费计划，未启用付费计费</label>
+              <div class="form-group">
+                <label for="asrTimeout">单次转写超时（秒）</label>
+                <input id="asrTimeout" class="form-input" type="number" min="5" max="600" value="180" required />
+              </div>
+              <label class="asr-check"><input id="asrMakeDefault" type="checkbox" checked /> 设为我的默认服务（用于新任务）</label>
+              <div class="asr-settings-actions">
+                <button id="asrSave" class="btn" type="submit">保存并应用</button>
+                <button id="asrCheck" class="btn btn-secondary" type="button">检查已保存配置</button>
+                <button id="asrClear" class="btn btn-secondary" type="button">清除本账号配置</button>
+              </div>
+              <p id="asrSettingsStatus" class="input-hint" role="status" aria-live="polite"></p>
+            </form>
+          </details>
         </div>
         <!-- 上传卡片 -->
         <div class="card-panel">
@@ -591,7 +629,8 @@
   <script src="/static/local-login.js?v=20261116-helper101"></script>
   <script src="/static/client-identity.js?v=20261127"></script>
   <script src="/static/resumable-upload.js?v=20261126-upload1"></script>
-  <script src="/static/app.js?v=20261127-multi-asr1"></script>
+  <script src="/static/asr-settings.js?v=20261127-settings1"></script>
+  <script src="/static/app.js?v=20261127-settings1"></script>
 </body>
 
 </html>

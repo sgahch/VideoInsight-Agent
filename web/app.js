@@ -256,6 +256,7 @@
   let queueView = null;
   let uploadClient = null;
   let identityResolved = false;
+  let accountStateEpoch = 0;
   let legacyConfigCleared = false;
   const AUTH_TOKEN_KEY = "videoinsight_auth_token";
 
@@ -1450,7 +1451,9 @@
     return provider ? { asr_provider: provider, asr_require_timestamps: provider !== "siliconflow" } : {};
   }
 
-  function renderAsrProviders(config) {
+  const asrSettingsView = window.AsrSettings?.create({ document, request: fetchJson, onChange: (config, chosen) => renderAsrProviders(config, chosen) });
+
+  function renderAsrProviders(config, chosen) {
     const select = document.getElementById("asrProvider");
     if (!select || !config) return;
     const names = { faster_whisper: "离线 Whisper · 时间戳 · 无 API 费用", siliconflow: "硅基流动 SenseVoice · 仅纯文本", cloudflare: "Cloudflare Whisper · 时间戳 · 需验证免费计划", groq: "Groq Whisper · 时间戳" };
@@ -1462,7 +1465,7 @@
       option.disabled = !item.configured;
       select.appendChild(option);
     }
-    select.value = config.default;
+    select.value = config.providers.some(item => item.id === chosen && item.configured) ? chosen : config.default;
   }
 
   async function startLinkAnalysis({ url, mode, useMock, label, asrProvider = null, requireTimestamps = true }, automaticRetry = false) {
@@ -2416,6 +2419,7 @@
   }
 
   function clearStaleAccountState() {
+    accountStateEpoch++;
     identityResolved = false;
     stopPolling();
     state.chatController?.abort();
@@ -2424,6 +2428,9 @@
     uploadClient = null;
     state.pendingCookieRetry = null;
     serverModelConfig = null;
+    asrSettingsView?.reset();
+    const asrSelect = document.getElementById("asrProvider");
+    if (asrSelect) asrSelect.replaceChildren();
     fillModelForm(null);
     renderModelState();
     updateAgentContext();
@@ -3048,8 +3055,11 @@
     renderUploadResumeHint();
     queueView.start();
     try {
+      const configEpoch = accountStateEpoch;
       const config = await fetchJson("/config");
+      if (!identityResolved || configEpoch !== accountStateEpoch) return;
       renderAsrProviders(config.asr);
+      asrSettingsView?.load(config.asr);
       if (identityResolved && config.llm.configured) {
         serverModelConfig = { provider: config.llm.provider, baseUrl: config.llm.base_url, model: config.llm.model, protocol: config.llm.protocol };
         els.llmApiKey.placeholder = "留空使用服务器默认模型";

@@ -114,10 +114,10 @@ class GroqTranscriber:
         try:
             return httpx.Client(
                 headers={"Authorization": f"Bearer {self.settings.groq_api_key}"},
-                timeout=httpx.Timeout(120, connect=15),
+                timeout=httpx.Timeout(self.settings.asr_timeout_seconds, connect=min(15, self.settings.asr_timeout_seconds)),
                 follow_redirects=False,
                 proxy=self.settings.groq_proxy_url,
-                trust_env=self.settings.groq_proxy_url is None,
+                trust_env=False,
             )
         except (httpx.InvalidURL, ValueError):
             raise ExternalDependencyError(

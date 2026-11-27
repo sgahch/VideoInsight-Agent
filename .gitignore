@@ -12,6 +12,7 @@ _pytest_full.txt
 _git_*.txt
 _verify_*.log
 .env
+data/asr-settings/
 data/tmp/
 data/results/
 data/logs/

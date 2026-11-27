@@ -135,7 +135,7 @@ def test_short_audio_is_one_request_and_does_not_require_dashscope(monkeypatch, 
     "proxy",
     [None, "http://user:private-proxy-password@127.0.0.1:7890", "https://proxy.example:8443"],
 )
-def test_proxy_is_explicit_and_overrides_system_proxy_only_when_set(monkeypatch, tmp_path, proxy):
+def test_proxy_is_explicit_and_uses_configured_timeout(monkeypatch, tmp_path, proxy):
     options = []
     original_client = httpx.Client
 
@@ -146,11 +146,12 @@ def test_proxy_is_explicit_and_overrides_system_proxy_only_when_set(monkeypatch,
         )
 
     monkeypatch.setattr(groq.httpx, "Client", client)
-    runtime = _settings(groq_proxy_url=proxy)
+    runtime = _settings(groq_proxy_url=proxy, asr_timeout_seconds=45)
     source = _wav(tmp_path / "source.wav")
     assert groq.GroqTranscriber(runtime, _Preprocessor()).transcribe(source, "task")
     assert options[0]["proxy"] == proxy
-    assert options[0]["trust_env"] is (proxy is None)
+    assert options[0]["trust_env"] is False
+    assert options[0]["timeout"].read == 45
     assert "private-proxy-password" not in repr(runtime)
 
 

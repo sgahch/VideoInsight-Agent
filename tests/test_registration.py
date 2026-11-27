@@ -54,6 +54,28 @@ def signup(client, sent, email="alice@example.com"):
     return code
 
 
+def test_asr_profiles_follow_signed_accounts_and_reject_forged_owners(setup):
+    client, sent, config = setup
+    signup(client, sent)
+    alice = client.get('/auth/me').json()['account_id']
+    response = client.put('/asr/settings/siliconflow', json={'api_key':'alice-private-asr', 'make_default':True}, headers={'X-Client-Id':'forged-browser'})
+    assert response.status_code == 200 and 'alice-private-asr' not in response.text
+    assert client.get('/asr/settings').json()['default'] == 'siliconflow'
+    bob = TestClient(main.app)
+    signup(bob, sent, 'bob@example.com')
+    own = bob.get('/asr/settings', headers={'X-Client-Id':alice}).json()
+    assert not own['fields']['siliconflow']['credential_saved']
+    assert bob.delete('/asr/settings/siliconflow', headers={'X-Client-Id':alice}).status_code == 200
+    from app.asr_settings import effective_settings
+    assert effective_settings(config, alice).siliconflow_api_key == 'alice-private-asr'
+    assert client.put('/asr/settings/siliconflow', json={'api_key':'csrf-key'}, headers={'Origin':'https://other.example'}).status_code == 403
+    outsider = TestClient(main.app)
+    assert outsider.get('/asr/settings', headers={'X-Client-Id':alice}).status_code == 401
+    assert outsider.post('/auth/login', json={'username':'owner','password':'admin-test-password'}).status_code == 200
+    assert outsider.get('/asr/settings', headers={'X-Client-Id':alice}).status_code == 403
+    assert not outsider.get('/asr/settings', headers={'X-Client-Id':'admin-browser'}).json()['fields']['siliconflow']['credential_saved']
+
+
 def test_verified_registration_logs_in_and_persists_hashed_password(setup):
     client, sent, config = setup
     assert client.get("/register").status_code == 200

@@ -51,6 +51,8 @@ CAPABILITIES = {p.id: p for p in [Capability("siliconflow", False, True),
 
 def pin_provider(request, settings):
     """Persist the destination before queuing, independently of later defaults."""
+    from app.asr_settings import effective_settings
+    settings = effective_settings(settings, request.client_id)
     if request.asr_provider is None and settings.asr_provider in CAPABILITIES:
         return request.model_copy(update={"asr_provider": settings.asr_provider})
     return request

@@ -639,6 +639,17 @@ a {
 }
 
 /* 按钮 */
+.asr-settings { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; }
+.asr-settings summary { cursor: pointer; color: var(--text-primary); font-weight: 600; padding: 6px 0; }
+.asr-settings summary:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 3px; }
+.asr-settings form { margin-top: 14px; max-width: 720px; }
+.asr-settings .form-group { margin: 14px 0; }
+.asr-check { display: flex; gap: 8px; align-items: flex-start; margin: 14px 0; font-size: 13px; line-height: 1.6; }
+.asr-check input { width: auto; margin-top: 4px; flex-shrink: 0; }
+.asr-settings-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.asr-settings-actions .btn { white-space: normal; }
+.asr-settings .input-hint { overflow-wrap: anywhere; }
+
 .btn {
   display: inline-flex;
   align-items: center;

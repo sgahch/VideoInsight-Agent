@@ -5,7 +5,7 @@ import logging
 from contextlib import asynccontextmanager, suppress
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import Cookie, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -324,12 +324,57 @@ def delete_auth_session(response: Response) -> dict[str, object]:
 
 
 @app.get("/config")
-def public_model_config() -> dict[str, object]:
+def public_model_config(x_client_id: Annotated[str | None, Header()] = None) -> dict[str, object]:
     """Authenticated UI configuration; credentials never leave the server."""
     provider = settings.llm_provider.lower()
     key = settings.deepseek_api_key if provider == "deepseek" else settings.openai_api_key if provider == "openai" else settings.deepseek_api_key or settings.openai_api_key
+    from app.asr_settings import public_settings
     from app.adapters.multi_asr import provider_catalog
-    return {"asr": {"default": settings.asr_provider, "providers": provider_catalog(settings)}, "llm": {"configured": bool(key) and provider != "mock", "provider": provider, "base_url": settings.llm_base_url, "model": settings.llm_model, "protocol": settings.llm_protocol}}
+    owner = _client_id_from_header(x_client_id)
+    asr = public_settings(settings, owner) if owner or settings.auth_password_hash else {"default": settings.asr_provider, "providers": provider_catalog(settings)}
+    return {"asr": asr, "llm": {"configured": bool(key) and provider != "mock", "provider": provider, "base_url": settings.llm_base_url, "model": settings.llm_model, "protocol": settings.llm_protocol}}
+
+
+@app.get("/asr/settings")
+def get_asr_settings(x_client_id: str | None = Header(default=None)) -> dict:
+    from app.asr_settings import public_settings
+    try: return public_settings(settings, _client_id_from_header(x_client_id))
+    except ValueError as error: raise HTTPException(422, str(error)) from None
+
+
+@app.put("/asr/settings/{provider}")
+async def update_asr_settings(provider: Literal["siliconflow", "cloudflare", "groq", "faster_whisper"], request: Request,
+                              x_client_id: str | None = Header(default=None)) -> dict:
+    from app.asr_settings import SettingsUpdate, save_settings
+    from pydantic import ValidationError
+    import json
+    _check_origin(request)
+    content = bytearray()
+    async for chunk in request.stream():
+        content.extend(chunk)
+        if len(content) > 16384: raise HTTPException(413, "ASR 配置过大。")
+    try: payload = SettingsUpdate.model_validate(json.loads(content))
+    except (ValueError, ValidationError): raise HTTPException(422, "配置格式无效，请检查字段和超时范围（5–600 秒）。") from None
+    try: return save_settings(settings, _client_id_from_header(x_client_id), provider, payload)
+    except ValueError as error: raise HTTPException(422, str(error)) from None
+
+
+@app.delete("/asr/settings/{provider}")
+def delete_asr_settings(provider: Literal["siliconflow", "cloudflare", "groq", "faster_whisper"], request: Request,
+                        x_client_id: str | None = Header(default=None)) -> dict:
+    from app.asr_settings import clear_settings
+    _check_origin(request)
+    try: return clear_settings(settings, _client_id_from_header(x_client_id), provider)
+    except ValueError as error: raise HTTPException(422, str(error)) from None
+
+
+@app.post("/asr/settings/{provider}/check")
+def check_asr_settings(provider: Literal["siliconflow", "cloudflare", "groq", "faster_whisper"], request: Request,
+                       x_client_id: str | None = Header(default=None)) -> dict:
+    from app.asr_settings import check_settings
+    _check_origin(request)
+    try: return check_settings(settings, _client_id_from_header(x_client_id), provider)
+    except ValueError as error: raise HTTPException(422, str(error)) from None
 
 
 @app.post("/parse-link")
