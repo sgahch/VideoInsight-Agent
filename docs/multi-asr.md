@@ -42,6 +42,21 @@ Diagnostics identify the actual model, paid/fallback segment counts, category
 of the first failure and the offline timestamp source. Free providers retain
 their existing policy.
 
+Release `7d942f1` was pushed before the production cutover on 2026-11-27.
+Linux regression passed 868 tests with 8 skipped; 42 browser unit tests passed.
+Candidate and production each completed real Qwen transcription and SRT/VTT
+export, plus locally injected HTTP 503 testing with actual offline inference.
+Only one failed paid attempt was made in that fault test; both intervals used
+free local output. An ordinary signed user's real browser upload then completed
+with two Qwen intervals, zero fallback intervals and 7.52 seconds of processing,
+and a native SRT download passed. Synthetic tasks were removed. All 5 account
+rows and 29 prior tasks remain, with the target user's 15-entry list intact.
+Only that account has the supplied Qwen credential, paid default and fallback
+consent; shared server paid credentials remain unset. Key file permissions are
+0600. A 390px viewport has no horizontal overflow. Web assets match the deployed
+GitHub commit. Private rollback snapshots are under
+`/opt/videoinsight/backups/20261127-paid-asr-7d942f1`.
+
 SenseVoiceSmall cannot satisfy a timestamp-required request. Selecting its
 clearly marked text-only option explicitly opts out of timestamps. The task
 contains plain transcript text, an empty public segment list and
@@ -111,10 +126,12 @@ VTT downloads passed. These measurements do not guarantee long-video throughput.
 Base Whisper may make recognition errors, including traditional Chinese output;
 larger models should not be loaded on this host without a new capacity check.
 
-Cloud adapters have transport-contract tests. No SiliconFlow or Cloudflare
-credentials were supplied in the referenced conversation or project configuration;
-their live inference is not claimed as verified. The deployment's actual working
-default is offline Whisper, not Groq or an unauthenticated cloud endpoint.
+Cloud adapters have transport-contract tests. After a personal SiliconFlow key
+was supplied, real SenseVoiceSmall and Qwen ASR inference passed on the deployed
+server. Cloudflare live inference remains unverified because its credentials
+were not supplied. The shared server default remains offline Whisper; the
+explicitly authorized target account now defaults to paid Qwen with free local
+fallback. Other accounts' settings are preserved.
 
 Sources: [SiliconFlow pricing](https://www.siliconflow.cn/pricing),
 [transcription API](https://docs.siliconflow.cn/docs/api/audio-transcriptions-post),

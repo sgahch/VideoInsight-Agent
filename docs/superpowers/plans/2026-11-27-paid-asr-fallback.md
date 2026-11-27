@@ -22,16 +22,16 @@ Report actual provider/model, timestamp source and fallback reason in diagnostic
 
 Implementation sequence (writing-plans; execute inline, user opted out of questions):
 
-- [ ] Add failing tests for paid authorization, exact audio boundaries, successful
+- [x] Add failing tests for paid authorization, exact audio boundaries, successful
       Qwen text, bounded free fallback, failure without fallback consent, account
       isolation, queued consent, diagnostics and retry consent preservation.
-- [ ] Implement focused paid adapter, config/schema/settings/catalog support and
+- [x] Implement focused paid adapter, config/schema/settings/catalog support and
       workflow diagnostics. Preserve existing providers and account security.
-- [ ] Add web consent controls, explicit paid price/fallback explanation and task
+- [x] Add web consent controls, explicit paid price/fallback explanation and task
       selection/retry support; exercise Node and Python regression suites.
-- [ ] Review, commit and push GitHub, then build candidate from current deployed
+- [x] Review, commit and push GitHub, then build candidate from current deployed
       image. Run Linux regression and real paid/fallback audio tests on server.
-- [ ] Back up/drain/cut over without changing other users or histories. Configure
+- [x] Back up/drain/cut over without changing other users or histories. Configure
       the signed current account, exercise real browser controls and subtitle
       downloads, record evidence, and remove synthetic test tasks.
 
